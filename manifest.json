@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.dgalarza.omarchy-buds",
+  "name": "Galaxy Buds",
+  "version": "0.1.0",
+  "author": "Damian Galarza",
+  "license": "MIT",
+  "description": "Galaxy Buds battery and selected controls through GalaxyBudsClient.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Galaxy Buds",
+    "description": "Per-earbud battery, wear and charging state, noise mode, and GalaxyBudsClient actions.",
+    "category": "Audio",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "hideWhenDisconnected": true
+    },
+    "schema": [
+      {
+        "key": "hideWhenDisconnected",
+        "type": "boolean",
+        "label": "Hide when the earbuds are disconnected",
+        "defaultValue": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+
+# Omarchy clones plugins but does not run repository setup scripts. This script
+# installs only the GalaxyBudsClient status hook. It never starts, stops, or
+# restarts GalaxyBudsClient and does not edit Omarchy configuration.
+set -euo pipefail
+
+plugin_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source_hook="$plugin_root/galaxy-client/OmarchyBudsStatus.cs"
+
+if ! command -v galaxybudsclient >/dev/null 2>&1; then
+  printf '%s\n' "GalaxyBudsClient was not found on PATH." >&2
+  printf '%s\n' "Install GalaxyBudsClient 5.2.1 or newer, then run this setup script again." >&2
+  exit 1
+fi
+
+if [[ ! -f "$source_hook" ]]; then
+  printf 'Missing hook source: %s\n' "$source_hook" >&2
+  exit 1
+fi
+
+data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
+config_home=${XDG_CONFIG_HOME:-"$HOME/.config"}
+data_home=${data_home%/}
+config_home=${config_home%/}
+current_scripts="$data_home/GalaxyBudsClient/scripts"
+legacy_scripts="$config_home/GalaxyBudsClient/scripts"
+
+# GalaxyBudsClient currently uses LocalApplicationData (XDG_DATA_HOME), while
+# older documentation named XDG_CONFIG_HOME. Prefer a path explicitly reported
+# by a client log, then an existing current layout, then an existing legacy one.
+reported_scripts=""
+for log_file in \
+  "$data_home/GalaxyBudsClient/application.log" \
+  "$data_home/GalaxyBudsClient/application-prev.log" \
+  "$config_home/GalaxyBudsClient/application.log" \
+  "$config_home/GalaxyBudsClient/application-prev.log"; do
+  [[ -f "$log_file" ]] || continue
+  line=$(grep -F "User script directory:" "$log_file" 2>/dev/null | tail -n 1 || true)
+  [[ -n "$line" ]] || continue
+  candidate=${line##*User script directory: }
+  if [[ "$candidate" == "$current_scripts" || "$candidate" == "$legacy_scripts" ]]; then
+    reported_scripts=$candidate
+    break
+  fi
+done
+
+if [[ -n "$reported_scripts" ]]; then
+  script_dir=$reported_scripts
+elif [[ -d "${current_scripts%/scripts}" ]]; then
+  script_dir=$current_scripts
+elif [[ -d "${legacy_scripts%/scripts}" ]]; then
+  script_dir=$legacy_scripts
+else
+  script_dir=$current_scripts
+fi
+
+target="$script_dir/OmarchyBudsStatus.cs"
+umask 077
+mkdir -p -- "$script_dir"
+
+if [[ -f "$target" ]] && cmp -s -- "$source_hook" "$target"; then
+  printf 'GalaxyBudsClient status hook is already current: %s\n' "$target"
+else
+  temporary=$(mktemp -- "$script_dir/.OmarchyBudsStatus.cs.XXXXXX")
+  cleanup() {
+    [[ -z "${temporary:-}" ]] || rm -f -- "$temporary"
+  }
+  trap cleanup EXIT
+
+  install -m 0644 -- "$source_hook" "$temporary"
+  mv -f -- "$temporary" "$target"
+  temporary=""
+  trap - EXIT
+  printf 'Installed GalaxyBudsClient status hook: %s\n' "$target"
+fi
+
+printf '\n%s\n' "Restart GalaxyBudsClient once so it loads the hook."
+printf '%s\n' "This setup script did not restart it and did not enable the Omarchy plugin."
+printf '%s\n' "After the restart, status will appear at:"
+printf '  %s\n' "${XDG_STATE_HOME:-"$HOME/.local/state"}/omarchy-buds/status.json"
