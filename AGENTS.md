@@ -13,9 +13,6 @@ described in the exploration notes.
 - GalaxyBudsClient remains the only owner of the Buds protocol connection.
 - Do not copy code or artwork from omarchy-pods. Its architecture and panel
   idiom are references, not source material for this repository.
-- Do not modify `~/.config/omarchy`, install the plugin, run `setup`, restart
-  GalaxyBudsClient, or send control actions to the connected earbuds while
-  implementing.
 - Do not edit `/usr/share/omarchy`.
 - Do not add a second Bluetooth/RFCOMM implementation.
 - Keep protocol/client integration in a small, replaceable boundary.
