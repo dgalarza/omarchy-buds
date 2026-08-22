@@ -7,6 +7,10 @@ runs supported controls through
 GalaxyBudsClient remains the only owner of the Buds protocol connection. This
 plugin does not open Bluetooth or RFCOMM itself.
 
+## Preview
+
+![Galaxy Buds panel showing battery levels and earbud controls](docs/images/panel.png)
+
 ## What the MVP includes
 
 - left, right, and case battery when GalaxyBudsClient reports them
