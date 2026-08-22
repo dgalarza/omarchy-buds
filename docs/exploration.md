@@ -111,6 +111,14 @@ needed by the panel:
 - `DetectConversations`
 - ambient level and other model-dependent fields
 
+Source verification also found device-response events for control changes.
+Modern noise-control devices return `NOISE_CONTROLS` acknowledgements or
+`NoiseControlUpdateResponse`; legacy ANC and Ambient changes have dedicated
+update responses. Equalizer, touch lock, conversation detection, and
+one-earbud noise control are represented in the universal acknowledgement
+decoder. The hook can therefore publish returned device values rather than
+inverting state when a local action is dispatched.
+
 The hook should write a versioned JSON snapshot atomically to:
 
 ```text

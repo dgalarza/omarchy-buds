@@ -5,6 +5,7 @@ const source = Deno.readTextFileSync(new URL("../Model.js", import.meta.url))
 const Model = new Function(source + `
   return {
     parseStatus, batteryFrom, defaultBattery, defaultStatus, busctlProcessId,
+    snapshotIsCurrent, snapshotNeedsProbe,
     noiseModeName, modelName, equalizerPresetName,
     levelText, levelFraction, batteryMeta, hasAnyBattery, elideError,
     SUPPORTED_SCHEMA, LEVEL_UNKNOWN, NOISE_UNKNOWN, NOISE_OFF, NOISE_ANC,
@@ -74,9 +75,42 @@ check("an unavailable case discards its sentinels", live.caseBattery, Model.defa
 check("case capability is independent of current case availability", live.supportsCaseBattery, true)
 check("Adaptive is accepted as observed status", live.noiseMode, Model.NOISE_ADAPTIVE)
 check("equalizer state parses", [live.equalizerEnabled, live.equalizerPreset], [true, 2])
+check("touch-lock state parses", live.touchLocked, false)
 check("conversation state parses", live.conversationDetection, true)
 check("one-earbud state parses", live.oneEarbudNoiseControl, true)
-check("known action is exposed", live.actions.ancToggle, Model.ACTION_ANC_TOGGLE)
+check("all confirmed control values parse", [
+  live.noiseMode,
+  live.equalizerEnabled,
+  live.equalizerPreset,
+  live.touchLocked,
+  live.conversationDetection,
+  live.oneEarbudNoiseControl
+], [Model.NOISE_ADAPTIVE, true, 2, false, true, true])
+check("all known actions are exposed", live.actions, {
+  ancToggle: Model.ACTION_ANC_TOGGLE,
+  ambientToggle: Model.ACTION_AMBIENT_TOGGLE,
+  equalizerToggle: Model.ACTION_EQUALIZER_TOGGLE,
+  touchLockToggle: Model.ACTION_TOUCH_LOCK_TOGGLE,
+  conversationToggle: Model.ACTION_CONVERSATION_TOGGLE,
+  oneEarbudToggle: Model.ACTION_ONE_EARBUD_TOGGLE
+})
+
+const controlsOff = Model.parseStatus(JSON.stringify({
+  schema_version: 1,
+  noise_control: { mode: 0 },
+  equalizer: { enabled: false, preset: 2 },
+  touch_lock: { enabled: false },
+  conversation_detection: { enabled: false },
+  one_earbud_noise_control: { enabled: false }
+}))
+check("confirmed false control values are preserved", [
+  controlsOff.noiseMode,
+  controlsOff.equalizerEnabled,
+  controlsOff.equalizerPreset,
+  controlsOff.touchLocked,
+  controlsOff.conversationDetection,
+  controlsOff.oneEarbudNoiseControl
+], [Model.NOISE_OFF, false, 2, false, false, false])
 
 // A valid partial snapshot is expected during connection setup, before the
 // first extended-status packet arrives.
@@ -156,6 +190,13 @@ check("busctl process ID parses", Model.busctlProcessId("PID=4242\nUID=1000\n"),
 check("busctl output must start a PID line", Model.busctlProcessId("PPID=42\nUID=1000\n"), -1)
 check("busctl process ID must be positive", Model.busctlProcessId("PID=0\n"), -1)
 check("busctl failure output has no process ID", Model.busctlProcessId("Failed to get credentials"), -1)
+check("matching bus owner makes a snapshot current", Model.snapshotIsCurrent(live, 4242), true)
+check("different bus owner makes a snapshot stale", Model.snapshotIsCurrent(live, 4243), false)
+check("missing bus owner makes a snapshot stale", Model.snapshotIsCurrent(live, -1), false)
+check("PID mismatch requests an immediate probe", Model.snapshotNeedsProbe(live, 4243), true)
+check("missing owner requests an immediate probe", Model.snapshotNeedsProbe(live, -1), true)
+check("matching owner needs no extra probe", Model.snapshotNeedsProbe(live, 4242), false)
+check("malformed status does not drive probes", Model.snapshotNeedsProbe(Model.defaultStatus(), -1), false)
 
 check("zero is a valid parsed battery level", Model.batteryFrom({
   available: true, level: 0, charging: false, placement: "Idle"

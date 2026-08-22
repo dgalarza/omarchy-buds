@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using GalaxyBudsClient.Message;
 using GalaxyBudsClient.Message.Decoder;
+using GalaxyBudsClient.Message.Parameter;
 using GalaxyBudsClient.Model;
 using GalaxyBudsClient.Model.Constants;
 using GalaxyBudsClient.Model.Specifications;
@@ -14,11 +15,16 @@ using GalaxyBudsClient.Scripting;
 using GalaxyBudsClient.Scripting.Hooks;
 
 // Loaded by GalaxyBudsClient's CSScript hook manager. The hook publishes
-// decoded status and mirrors transitions from the client's own action surface;
-// it never opens a Bluetooth socket or sends an earbud command.
+// decoded status and device-confirmed control responses; it never opens a
+// Bluetooth socket or sends an earbud command.
 public class OmarchyBudsStatus : IHook
 {
     private const int SchemaVersion = 1;
+    private const UnixFileMode StateDirectoryMode = UnixFileMode.UserRead
+        | UnixFileMode.UserWrite
+        | UnixFileMode.UserExecute;
+    private const UnixFileMode StateFileMode = UnixFileMode.UserRead
+        | UnixFileMode.UserWrite;
     private readonly object _writeLock = new object();
     private readonly BluetoothImpl _bluetooth = BluetoothImpl.Instance;
     private readonly SppMessageReceiver _receiver = SppMessageReceiver.Instance;
@@ -60,10 +66,13 @@ public class OmarchyBudsStatus : IHook
     {
         _receiver.ExtendedStatusUpdate += OnExtendedStatusUpdate;
         _receiver.StatusUpdate += OnStatusUpdate;
+        _receiver.AcknowledgementResponse += OnAcknowledgement;
+        _receiver.AmbientEnabledUpdateResponse += OnAmbientEnabledConfirmed;
+        _receiver.AncEnabledUpdateResponse += OnAncEnabledConfirmed;
+        _receiver.NoiseControlUpdateResponse += OnNoiseControlConfirmed;
         _bluetooth.Connected += OnConnected;
         _bluetooth.Disconnected += OnDisconnected;
         _bluetooth.BluetoothError += OnBluetoothError;
-        EventDispatcher.Instance.EventReceived += OnClientEvent;
 
         lock (_writeLock)
         {
@@ -90,10 +99,13 @@ public class OmarchyBudsStatus : IHook
     {
         _receiver.ExtendedStatusUpdate -= OnExtendedStatusUpdate;
         _receiver.StatusUpdate -= OnStatusUpdate;
+        _receiver.AcknowledgementResponse -= OnAcknowledgement;
+        _receiver.AmbientEnabledUpdateResponse -= OnAmbientEnabledConfirmed;
+        _receiver.AncEnabledUpdateResponse -= OnAncEnabledConfirmed;
+        _receiver.NoiseControlUpdateResponse -= OnNoiseControlConfirmed;
         _bluetooth.Connected -= OnConnected;
         _bluetooth.Disconnected -= OnDisconnected;
         _bluetooth.BluetoothError -= OnBluetoothError;
-        EventDispatcher.Instance.EventReceived -= OnClientEvent;
 
         lock (_writeLock)
         {
@@ -192,55 +204,147 @@ public class OmarchyBudsStatus : IHook
         _oneEarbudNoiseControl = status.NoiseControlsWithOneEarbud;
     }
 
-    // GalaxyBudsClient's public actions update its own local state immediately,
-    // but most do not prompt a fresh extended-status packet. Mirror those
-    // action transitions here, then let the next decoded packet reconcile them.
-    private void OnClientEvent(Event clientEvent, object? argument)
+    // Control values change only after a decoded device response. This avoids
+    // presenting GalaxyBudsClient's locally dispatched toggle as earbud state.
+    private void OnAcknowledgement(object? sender, AcknowledgementDecoder acknowledgement)
     {
         lock (_writeLock)
         {
             if (!_bluetooth.IsConnected || _extendedStatus == null)
                 return;
 
-            var changed = true;
-            switch (clientEvent)
+            var confirmed = false;
+            switch (acknowledgement.Id)
             {
-                case Event.AncToggle:
-                    _noiseMode = _noiseMode == 1 ? 0 : 1;
+                case MsgIds.NOISE_CONTROLS:
+                    if (acknowledgement.Parameters is SimpleAckParameter noiseMode)
+                        confirmed = ApplyNoiseControlModeLocked(noiseMode.Value);
                     break;
-                case Event.AmbientToggle:
-                    _noiseMode = _noiseMode == 2 ? 0 : 2;
+                case MsgIds.SET_NOISE_REDUCTION:
+                    if (acknowledgement.Parameters is SimpleAckParameter ancEnabled)
+                        confirmed = ApplyAncEnabledLocked(ancEnabled.Value != 0);
                     break;
-                case Event.SetNoiseControlState:
-                    if (argument is NoiseControlModes mode)
-                        _noiseMode = (int)mode;
-                    else
-                        changed = false;
+                case MsgIds.EQUALIZER:
+                    confirmed = ApplyEqualizerConfirmationLocked(acknowledgement.RawParameters);
                     break;
-                case Event.EqualizerToggle:
-                    _equalizerEnabled = !_equalizerEnabled;
+                case MsgIds.LOCK_TOUCHPAD:
+                    if (acknowledgement.Parameters is LockTouchpadAckParameter touchLock)
+                    {
+                        _touchLocked = touchLock.TouchpadLock;
+                        confirmed = true;
+                    }
                     break;
-                case Event.EqualizerNextPreset:
-                    _equalizerEnabled = true;
-                    _equalizerPreset = (_equalizerPreset + 1) % 5;
+                case MsgIds.SET_DETECT_CONVERSATIONS:
+                    if (acknowledgement.Parameters is SimpleAckParameter conversationDetection)
+                    {
+                        _conversationDetection = conversationDetection.Value != 0;
+                        confirmed = true;
+                    }
                     break;
-                case Event.LockTouchpadToggle:
-                    _touchLocked = !_touchLocked;
-                    break;
-                case Event.ToggleConversationDetect:
-                    _conversationDetection = !_conversationDetection;
-                    break;
-                case Event.SwitchAncOne:
-                    _oneEarbudNoiseControl = !_oneEarbudNoiseControl;
-                    break;
-                default:
-                    changed = false;
+                case MsgIds.SET_ANC_WITH_ONE_EARBUD:
+                    if (acknowledgement.Parameters is SimpleAckParameter oneEarbud)
+                    {
+                        _oneEarbudNoiseControl = oneEarbud.Value != 0;
+                        confirmed = true;
+                    }
                     break;
             }
 
-            if (changed)
+            if (confirmed)
                 WriteSnapshotLocked(true);
         }
+    }
+
+    private void OnAmbientEnabledConfirmed(object? sender, bool enabled)
+    {
+        lock (_writeLock)
+        {
+            if (_bluetooth.IsConnected && _extendedStatus != null
+                && ApplyAmbientEnabledLocked(enabled))
+            {
+                WriteSnapshotLocked(true);
+            }
+        }
+    }
+
+    private void OnAncEnabledConfirmed(object? sender, bool enabled)
+    {
+        lock (_writeLock)
+        {
+            if (_bluetooth.IsConnected && _extendedStatus != null
+                && ApplyAncEnabledLocked(enabled))
+            {
+                WriteSnapshotLocked(true);
+            }
+        }
+    }
+
+    private void OnNoiseControlConfirmed(object? sender, NoiseControlModes mode)
+    {
+        lock (_writeLock)
+        {
+            if (_bluetooth.IsConnected && _extendedStatus != null
+                && ApplyNoiseControlModeLocked((int)mode))
+            {
+                WriteSnapshotLocked(true);
+            }
+        }
+    }
+
+    private bool ApplyNoiseControlModeLocked(int mode)
+    {
+        if (mode < (int)NoiseControlModes.Off || mode > (int)NoiseControlModes.Adaptive)
+            return false;
+
+        _noiseMode = mode;
+        return true;
+    }
+
+    private bool ApplyAmbientEnabledLocked(bool enabled)
+    {
+        if (enabled)
+            _noiseMode = (int)NoiseControlModes.AmbientSound;
+        else if (_noiseMode == (int)NoiseControlModes.AmbientSound)
+            _noiseMode = (int)NoiseControlModes.Off;
+
+        return true;
+    }
+
+    private bool ApplyAncEnabledLocked(bool enabled)
+    {
+        if (enabled)
+            _noiseMode = (int)NoiseControlModes.NoiseReduction;
+        else if (_noiseMode == (int)NoiseControlModes.NoiseReduction)
+            _noiseMode = (int)NoiseControlModes.Off;
+
+        return true;
+    }
+
+    private bool ApplyEqualizerConfirmationLocked(byte[]? values)
+    {
+        if (values == null || values.Length == 0)
+            return false;
+
+        if (_bluetooth.CurrentModel == Models.Buds)
+        {
+            _equalizerEnabled = values[0] != 0;
+            if (values.Length > 1)
+            {
+                var preset = values[1];
+                if (preset > 4)
+                    preset -= 5;
+                _equalizerPreset = preset <= 4 ? preset : -1;
+            }
+            return true;
+        }
+
+        var mode = values[0];
+        if (mode > 5)
+            return false;
+
+        _equalizerEnabled = mode != 0;
+        _equalizerPreset = mode == 0 ? 2 : mode - 1;
+        return true;
     }
 
     private bool Supports(Features feature)
@@ -400,6 +504,7 @@ public class OmarchyBudsStatus : IHook
                 return;
 
             Directory.CreateDirectory(directory);
+            File.SetUnixFileMode(directory, StateDirectoryMode);
             var json = JsonSerializer.Serialize(BuildSnapshot(connected));
 
             using (var stream = new FileStream(
@@ -409,6 +514,7 @@ public class OmarchyBudsStatus : IHook
                 FileShare.None))
             using (var writer = new StreamWriter(stream, new UTF8Encoding(false), 1024, true))
             {
+                File.SetUnixFileMode(_temporaryPath, StateFileMode);
                 writer.Write(json);
                 writer.Flush();
                 stream.Flush(true);

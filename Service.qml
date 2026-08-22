@@ -19,8 +19,8 @@ Item {
   readonly property string statePath: (Quickshell.env("XDG_STATE_HOME")
     || Quickshell.env("HOME") + "/.local/state") + "/omarchy-buds/status.json"
   readonly property bool hookReady: statusFilePresent && status.ok
-  readonly property bool snapshotCurrent: hookReady && status.processId > 0
-    && status.processId === clientProcessId
+  readonly property bool snapshotCurrent: hookReady
+    && Model.snapshotIsCurrent(status, clientProcessId)
   readonly property bool connected: clientRunning && snapshotCurrent && status.connected
   readonly property bool hasBattery: connected && Model.hasAnyBattery(status)
   readonly property bool busy: actionProcess.running
@@ -48,7 +48,9 @@ Item {
 
   function applyText(raw) {
     statusFilePresent = true
-    status = Model.parseStatus(raw)
+    var parsed = Model.parseStatus(raw)
+    status = parsed
+    if (Model.snapshotNeedsProbe(parsed, clientProcessId)) probeClient()
   }
 
   function stateGone() {
@@ -56,9 +58,17 @@ Item {
     status = Model.defaultStatus()
   }
 
+  function probeClient() {
+    if (clientProbe.running) {
+      deferredClientProbe.restart()
+      return
+    }
+    clientProbe.running = true
+  }
+
   function refresh() {
     stateFile.reload()
-    if (!clientProbe.running) clientProbe.running = true
+    probeClient()
   }
 
   function actionAllowed(action) {
@@ -121,7 +131,7 @@ Item {
 
   // A crashed process cannot remove its hook output. Treat the status file as
   // live only while GalaxyBudsClient still owns its well-known session-bus
-  // name, so a stale connected snapshot never keeps the panel active.
+  // name, and react to owner changes instead of waiting for the fallback poll.
   Process {
     id: clientProbe
     running: false
@@ -134,12 +144,46 @@ Item {
     }
   }
 
+  Process {
+    id: clientOwnerMonitor
+    running: true
+    command: [
+      "busctl", "--user",
+      "--match=type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='me.timschneeberger.GalaxyBudsClient'",
+      "monitor"
+    ]
+    stdout: SplitParser {
+      onRead: function(line) {
+        if (String(line).indexOf("Member=NameOwnerChanged") >= 0) root.probeClient()
+      }
+    }
+    stderr: StdioCollector { waitForEnd: false }
+    onExited: {
+      root.probeClient()
+      clientOwnerMonitorRestart.restart()
+    }
+  }
+
   Timer {
+    id: clientOwnerMonitorRestart
     interval: 5000
+    repeat: false
+    onTriggered: if (!clientOwnerMonitor.running) clientOwnerMonitor.running = true
+  }
+
+  Timer {
+    id: deferredClientProbe
+    interval: 100
+    repeat: false
+    onTriggered: root.probeClient()
+  }
+
+  Timer {
+    interval: 30000
     repeat: true
     running: true
     triggeredOnStart: true
-    onTriggered: if (!clientProbe.running) clientProbe.running = true
+    onTriggered: root.probeClient()
   }
 
   Process {
@@ -157,7 +201,7 @@ Item {
           || "GalaxyBudsClient rejected the action")
       }
       actionStatusTimer.restart()
-      if (!clientProbe.running) clientProbe.running = true
+      root.probeClient()
     }
   }
 

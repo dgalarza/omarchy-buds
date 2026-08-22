@@ -189,6 +189,16 @@ function busctlProcessId(raw) {
   return isFinite(processId) && processId > 0 ? processId : -1
 }
 
+function snapshotIsCurrent(status, clientProcessId) {
+  return !!status && status.ok === true && status.processId > 0
+    && status.processId === clientProcessId
+}
+
+function snapshotNeedsProbe(status, clientProcessId) {
+  return !!status && status.ok === true && status.processId > 0
+    && status.processId !== clientProcessId
+}
+
 function noiseModeName(mode) {
   if (mode === NOISE_OFF) return "Off"
   if (mode === NOISE_ANC) return "Noise cancellation"

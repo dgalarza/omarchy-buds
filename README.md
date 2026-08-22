@@ -51,10 +51,17 @@ Install the status hook:
 ```
 
 `setup` only copies `galaxy-client/OmarchyBudsStatus.cs` into the active
-GalaxyBudsClient script directory. It checks the current
-`$XDG_DATA_HOME/GalaxyBudsClient/scripts` layout and the older
-`$XDG_CONFIG_HOME/GalaxyBudsClient/scripts` layout. It does not install or
-restart GalaxyBudsClient, edit Omarchy settings, or enable the widget.
+GalaxyBudsClient script directory. It accepts either the current
+`$XDG_DATA_HOME/GalaxyBudsClient/scripts` layout or the older
+`$XDG_CONFIG_HOME/GalaxyBudsClient/scripts` layout. It first checks the path
+reported in GalaxyBudsClient's application log, then existing data and config
+layouts, and falls back to the current data layout for a new installation. It
+does not install or restart GalaxyBudsClient, edit Omarchy settings, or enable
+the widget.
+
+The installed C# hook runs inside GalaxyBudsClient with the client's user
+permissions. Review it before running `setup` when installing from a repository
+you do not control.
 
 Fully quit and relaunch GalaxyBudsClient once so its script manager loads the
 hook. Then enable the widget:
@@ -72,10 +79,11 @@ omarchy bar set io.github.dgalarza.omarchy-buds hideWhenDisconnected false --jso
 
 ## How it works
 
-The C# hook subscribes to GalaxyBudsClient's decoded status events and its
-public action dispatcher. GalaxyBudsClient does not emit a fresh extended
-status packet for every toggle, so the hook mirrors accepted action transitions
-and reconciles them when the next decoded status arrives. It writes a
+The C# hook subscribes to GalaxyBudsClient's decoded status and response
+events. GalaxyBudsClient does not emit a fresh extended status packet for every
+toggle, so the hook consumes the acknowledgement or mode-update response sent
+back by the earbuds. It does not treat local action dispatch as device state.
+A later extended status remains authoritative. The hook writes a
 schema-versioned snapshot atomically to:
 
 ```text
@@ -83,10 +91,15 @@ $XDG_STATE_HOME/omarchy-buds/status.json
 # fallback: ~/.local/state/omarchy-buds/status.json
 ```
 
+The hook restricts the state directory to the current user (`0700`) and the
+snapshot to user read/write access (`0600`).
+
 `Service.qml` watches that file with Quickshell `FileView`. It also checks that
 GalaxyBudsClient still owns `me.timschneeberger.GalaxyBudsClient` on the user
-bus and matches the bus owner's process ID to the snapshot writer. A snapshot
-left behind by a crash therefore cannot be presented as a live connection.
+bus and matches the bus owner's process ID to the snapshot writer. A bus owner
+change triggers an immediate check; a 30-second poll is retained as a recovery
+fallback for the monitor. A snapshot left behind by a crash is therefore
+invalidated without waiting for the fallback poll.
 
 Controls execute known `galaxybudsclient action -e ...` identifiers. The panel
 accepts only the identifiers its parser recognizes and only renders an action
@@ -96,11 +109,26 @@ status update.
 The integration boundary is limited to `Service.qml` and
 `galaxy-client/OmarchyBudsStatus.cs`. Protocol decoding remains upstream.
 
+## Update
+
+Update the repository, reinstall the external hook, and then fully restart
+GalaxyBudsClient:
+
+```bash
+omarchy plugin update io.github.dgalarza.omarchy-buds
+~/.config/omarchy/plugins/io.github.dgalarza.omarchy-buds/setup
+```
+
+The second step is required because Omarchy updates the plugin directory but
+not the hook copy in GalaxyBudsClient's script directory. `setup` is idempotent
+and reports when the installed hook is already current.
+
 ## Controls
 
 A left click opens the panel. The switches invoke GalaxyBudsClient toggle
-actions. The hook reflects the matching client action event in the snapshot;
-the next decoded extended status remains authoritative.
+actions. The displayed value changes when the hook receives the matching
+earbud acknowledgement or decoded update; a later extended status remains
+authoritative.
 
 | Key | Action |
 |---|---|
@@ -140,30 +168,32 @@ Check GalaxyBudsClient's `application.log` in its data directory for
 API is the least stable part of this integration and may require an update to
 the hook after a client release.
 
-**A switch returns to its previous state**
+**A switch does not change**
 
-A later decoded status can correct an action transition if the earbuds report a
-different value. CLI failures are shown directly in the panel.
+The panel does not assume that a locally dispatched action reached the earbuds.
+It keeps the previous value if GalaxyBudsClient reports a CLI failure or the
+hook receives no matching device response. Check GalaxyBudsClient's log for a
+Bluetooth or protocol error.
 
 ## Remove
 
-Disable and remove the Omarchy plugin first:
+Disable the widget, then fully quit GalaxyBudsClient so the loaded hook cannot
+rewrite its state file:
 
 ```bash
 omarchy plugin disable io.github.dgalarza.omarchy-buds
-omarchy plugin remove io.github.dgalarza.omarchy-buds
 ```
 
-The hook is installed outside the plugin directory, so remove the copy from
-the layout GalaxyBudsClient uses:
+Remove the external hook and its state, then remove the plugin:
 
 ```bash
 rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/GalaxyBudsClient/scripts/OmarchyBudsStatus.cs"
 rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/GalaxyBudsClient/scripts/OmarchyBudsStatus.cs"
 rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-buds"
+omarchy plugin remove io.github.dgalarza.omarchy-buds
 ```
 
-Restart GalaxyBudsClient after removing the hook.
+GalaxyBudsClient can then be relaunched without the hook.
 
 ## Development checks
 
@@ -172,13 +202,26 @@ No check requires installing or enabling the plugin:
 ```bash
 omarchy plugin validate .
 deno run --allow-read tests/model.test.js
+deno run --allow-read tests/hook-contract.test.js
+deno run --allow-read tests/service-contract.test.js
+dotnet run --project tests/hook/HookTests.csproj
 bash -n setup
 qmllint -I /usr/share/omarchy/shell Panel.qml Service.qml GalaxyBudsIcon.qml
 ```
 
+The hook behavior harness requires the .NET 10 SDK; end users only need the
+GalaxyBudsClient package listed above.
+
 `tests/model.test.js` covers complete, partial, absent, malformed, and
-unsupported-version status input. See [`docs/exploration.md`](docs/exploration.md)
-for the verified GalaxyBudsClient and Omarchy integration surfaces.
+unsupported-version status input, all control fields, and process-owner
+matching. `tests/hook-contract.test.js` protects the device-response
+subscriptions and atomic-write contract without loading GalaxyBudsClient.
+The .NET harness compiles the production hook against local client stubs and
+exercises acknowledgement values, decoded-state reconciliation, and private
+permissions. `tests/service-contract.test.js` protects the narrow D-Bus owner
+monitor and its fallback probe. None of these checks contacts earbuds. See
+[`docs/exploration.md`](docs/exploration.md) for the verified client and Omarchy
+integration surfaces.
 
 ## License
 
