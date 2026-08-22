@@ -6,15 +6,16 @@ using System.Text;
 using System.Text.Json;
 using GalaxyBudsClient.Message;
 using GalaxyBudsClient.Message.Decoder;
+using GalaxyBudsClient.Model;
 using GalaxyBudsClient.Model.Constants;
 using GalaxyBudsClient.Model.Specifications;
 using GalaxyBudsClient.Platform;
 using GalaxyBudsClient.Scripting;
 using GalaxyBudsClient.Scripting.Hooks;
 
-// Loaded by GalaxyBudsClient's CSScript hook manager. The hook publishes only
-// state already decoded by GalaxyBudsClient; it never opens a Bluetooth socket
-// or sends an earbud command.
+// Loaded by GalaxyBudsClient's CSScript hook manager. The hook publishes
+// decoded status and mirrors transitions from the client's own action surface;
+// it never opens a Bluetooth socket or sends an earbud command.
 public class OmarchyBudsStatus : IHook
 {
     private const int SchemaVersion = 1;
@@ -29,6 +30,12 @@ public class OmarchyBudsStatus : IHook
     private bool _leftCharging;
     private bool _rightCharging;
     private bool _caseCharging;
+    private int _noiseMode = -1;
+    private bool _equalizerEnabled;
+    private int _equalizerPreset = -1;
+    private bool _touchLocked;
+    private bool _conversationDetection;
+    private bool _oneEarbudNoiseControl;
 
     private ScriptLogger Logger => new ScriptLogger(this);
 
@@ -56,6 +63,7 @@ public class OmarchyBudsStatus : IHook
         _bluetooth.Connected += OnConnected;
         _bluetooth.Disconnected += OnDisconnected;
         _bluetooth.BluetoothError += OnBluetoothError;
+        EventDispatcher.Instance.EventReceived += OnClientEvent;
 
         lock (_writeLock)
         {
@@ -68,6 +76,7 @@ public class OmarchyBudsStatus : IHook
                     _leftCharging = _extendedStatus.IsLeftCharging;
                     _rightCharging = _extendedStatus.IsRightCharging;
                     _caseCharging = _extendedStatus.IsCaseCharging;
+                    ApplyDecodedControlStateLocked(_extendedStatus);
                 }
             }
 
@@ -84,6 +93,7 @@ public class OmarchyBudsStatus : IHook
         _bluetooth.Connected -= OnConnected;
         _bluetooth.Disconnected -= OnDisconnected;
         _bluetooth.BluetoothError -= OnBluetoothError;
+        EventDispatcher.Instance.EventReceived -= OnClientEvent;
 
         lock (_writeLock)
         {
@@ -96,11 +106,7 @@ public class OmarchyBudsStatus : IHook
     {
         lock (_writeLock)
         {
-            _basicStatus = null;
-            _extendedStatus = null;
-            _leftCharging = false;
-            _rightCharging = false;
-            _caseCharging = false;
+            ResetStatusLocked();
             WriteSnapshotLocked(true);
         }
     }
@@ -119,11 +125,7 @@ public class OmarchyBudsStatus : IHook
     {
         lock (_writeLock)
         {
-            _basicStatus = null;
-            _extendedStatus = null;
-            _leftCharging = false;
-            _rightCharging = false;
-            _caseCharging = false;
+            ResetStatusLocked();
             WriteSnapshotLocked(false);
         }
     }
@@ -137,6 +139,7 @@ public class OmarchyBudsStatus : IHook
             _leftCharging = status.IsLeftCharging;
             _rightCharging = status.IsRightCharging;
             _caseCharging = status.IsCaseCharging;
+            ApplyDecodedControlStateLocked(status);
             WriteSnapshotLocked(_bluetooth.IsConnected);
         }
     }
@@ -150,6 +153,93 @@ public class OmarchyBudsStatus : IHook
             _rightCharging = status.IsRightCharging;
             _caseCharging = status.IsCaseCharging;
             WriteSnapshotLocked(_bluetooth.IsConnected);
+        }
+    }
+
+    private void ResetStatusLocked()
+    {
+        _basicStatus = null;
+        _extendedStatus = null;
+        _leftCharging = false;
+        _rightCharging = false;
+        _caseCharging = false;
+        _noiseMode = -1;
+        _equalizerEnabled = false;
+        _equalizerPreset = -1;
+        _touchLocked = false;
+        _conversationDetection = false;
+        _oneEarbudNoiseControl = false;
+    }
+
+    private void ApplyDecodedControlStateLocked(ExtendedStatusUpdateDecoder status)
+    {
+        var supportsNoiseControl = Supports(Features.NoiseControl);
+        var supportsAnc = Supports(Features.Anc);
+        var supportsAmbient = Supports(Features.AmbientSound);
+
+        if (supportsNoiseControl)
+            _noiseMode = (int)status.NoiseControlMode;
+        else if (supportsAnc && status.NoiseCancelling)
+            _noiseMode = 1;
+        else if (supportsAmbient && status.AmbientSoundEnabled)
+            _noiseMode = 2;
+        else
+            _noiseMode = supportsAnc || supportsAmbient ? 0 : -1;
+
+        ReadEqualizerState(status, out _equalizerEnabled, out _equalizerPreset);
+        _touchLocked = status.TouchpadLock;
+        _conversationDetection = status.DetectConversations;
+        _oneEarbudNoiseControl = status.NoiseControlsWithOneEarbud;
+    }
+
+    // GalaxyBudsClient's public actions update its own local state immediately,
+    // but most do not prompt a fresh extended-status packet. Mirror those
+    // action transitions here, then let the next decoded packet reconcile them.
+    private void OnClientEvent(Event clientEvent, object? argument)
+    {
+        lock (_writeLock)
+        {
+            if (!_bluetooth.IsConnected || _extendedStatus == null)
+                return;
+
+            var changed = true;
+            switch (clientEvent)
+            {
+                case Event.AncToggle:
+                    _noiseMode = _noiseMode == 1 ? 0 : 1;
+                    break;
+                case Event.AmbientToggle:
+                    _noiseMode = _noiseMode == 2 ? 0 : 2;
+                    break;
+                case Event.SetNoiseControlState:
+                    if (argument is NoiseControlModes mode)
+                        _noiseMode = (int)mode;
+                    else
+                        changed = false;
+                    break;
+                case Event.EqualizerToggle:
+                    _equalizerEnabled = !_equalizerEnabled;
+                    break;
+                case Event.EqualizerNextPreset:
+                    _equalizerEnabled = true;
+                    _equalizerPreset = (_equalizerPreset + 1) % 5;
+                    break;
+                case Event.LockTouchpadToggle:
+                    _touchLocked = !_touchLocked;
+                    break;
+                case Event.ToggleConversationDetect:
+                    _conversationDetection = !_conversationDetection;
+                    break;
+                case Event.SwitchAncOne:
+                    _oneEarbudNoiseControl = !_oneEarbudNoiseControl;
+                    break;
+                default:
+                    changed = false;
+                    break;
+            }
+
+            if (changed)
+                WriteSnapshotLocked(true);
         }
     }
 
@@ -194,37 +284,23 @@ public class OmarchyBudsStatus : IHook
         };
     }
 
-    private int NoiseMode(bool supportsNoiseControl, bool supportsAnc, bool supportsAmbient)
+    private void ReadEqualizerState(
+        ExtendedStatusUpdateDecoder status,
+        out bool enabled,
+        out int preset)
     {
-        if (_extendedStatus == null)
-            return -1;
-        if (supportsNoiseControl)
-            return (int)_extendedStatus.NoiseControlMode;
-        if (supportsAnc && _extendedStatus.NoiseCancelling)
-            return 1;
-        if (supportsAmbient && _extendedStatus.AmbientSoundEnabled)
-            return 2;
-        return supportsAnc || supportsAmbient ? 0 : -1;
-    }
-
-    private void EqualizerState(out bool enabled, out int preset)
-    {
-        enabled = false;
-        preset = -1;
-        if (_extendedStatus == null)
-            return;
-
         if (_bluetooth.CurrentModel == Models.Buds)
         {
-            enabled = _extendedStatus.EqualizerEnabled;
-            preset = _extendedStatus.EqualizerMode;
+            enabled = status.EqualizerEnabled;
+            preset = status.EqualizerMode;
             if (preset > 4)
                 preset -= 5;
         }
         else
         {
-            enabled = _extendedStatus.EqualizerMode != 0;
-            preset = enabled ? _extendedStatus.EqualizerMode - 1 : -1;
+            enabled = status.EqualizerMode != 0;
+            // GalaxyBudsClient keeps Dynamic selected while EQ is disabled.
+            preset = enabled ? status.EqualizerMode - 1 : 2;
         }
 
         if (preset < 0 || preset > 4)
@@ -235,7 +311,6 @@ public class OmarchyBudsStatus : IHook
     {
         var hasExtendedStatus = connected && _extendedStatus != null;
         var supportsCaseBattery = connected && Supports(Features.CaseBattery);
-        var supportsNoiseControl = hasExtendedStatus && Supports(Features.NoiseControl);
         var supportsAnc = hasExtendedStatus && Supports(Features.Anc);
         var supportsAmbient = hasExtendedStatus && Supports(Features.AmbientSound);
         var supportsConversation = hasExtendedStatus && Supports(Features.DetectConversations);
@@ -253,8 +328,6 @@ public class OmarchyBudsStatus : IHook
         var rightAvailable = connected && rightLevel > 0 && rightLevel <= 100
             && rightPlacement != PlacementStates.Disconnected;
         var caseAvailable = supportsCaseBattery && caseLevel > 0 && caseLevel <= 100;
-
-        EqualizerState(out var equalizerEnabled, out var equalizerPreset);
 
         var currentModel = _bluetooth.CurrentModel;
         var model = currentModel == Models.NULL ? string.Empty : currentModel.ToString();
@@ -283,27 +356,24 @@ public class OmarchyBudsStatus : IHook
             },
             ["noise_control"] = new Dictionary<string, object>
             {
-                ["mode"] = NoiseMode(supportsNoiseControl, supportsAnc, supportsAmbient)
+                ["mode"] = hasExtendedStatus ? _noiseMode : -1
             },
             ["equalizer"] = new Dictionary<string, object>
             {
-                ["enabled"] = hasExtendedStatus && equalizerEnabled,
-                ["preset"] = hasExtendedStatus ? equalizerPreset : -1
+                ["enabled"] = hasExtendedStatus && _equalizerEnabled,
+                ["preset"] = hasExtendedStatus ? _equalizerPreset : -1
             },
             ["touch_lock"] = new Dictionary<string, object>
             {
-                ["enabled"] = hasExtendedStatus && _extendedStatus != null
-                    && _extendedStatus.TouchpadLock
+                ["enabled"] = hasExtendedStatus && _touchLocked
             },
             ["conversation_detection"] = new Dictionary<string, object>
             {
-                ["enabled"] = supportsConversation && _extendedStatus != null
-                    && _extendedStatus.DetectConversations
+                ["enabled"] = supportsConversation && _conversationDetection
             },
             ["one_earbud_noise_control"] = new Dictionary<string, object>
             {
-                ["enabled"] = supportsOneEarbud && _extendedStatus != null
-                    && _extendedStatus.NoiseControlsWithOneEarbud
+                ["enabled"] = supportsOneEarbud && _oneEarbudNoiseControl
             },
             ["actions"] = new Dictionary<string, object>
             {

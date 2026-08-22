@@ -72,7 +72,10 @@ omarchy bar set io.github.dgalarza.omarchy-buds hideWhenDisconnected false --jso
 
 ## How it works
 
-The C# hook subscribes to GalaxyBudsClient's decoded status events. It writes a
+The C# hook subscribes to GalaxyBudsClient's decoded status events and its
+public action dispatcher. GalaxyBudsClient does not emit a fresh extended
+status packet for every toggle, so the hook mirrors accepted action transitions
+and reconciles them when the next decoded status arrives. It writes a
 schema-versioned snapshot atomically to:
 
 ```text
@@ -96,8 +99,8 @@ The integration boundary is limited to `Service.qml` and
 ## Controls
 
 A left click opens the panel. The switches invoke GalaxyBudsClient toggle
-actions and wait for the next decoded snapshot rather than claiming an
-optimistic state.
+actions. The hook reflects the matching client action event in the snapshot;
+the next decoded extended status remains authoritative.
 
 | Key | Action |
 |---|---|
@@ -137,11 +140,10 @@ Check GalaxyBudsClient's `application.log` in its data directory for
 API is the least stable part of this integration and may require an update to
 the hook after a client release.
 
-**A switch does not move immediately**
+**A switch returns to its previous state**
 
-The panel deliberately waits for the state GalaxyBudsClient decodes from the
-earbuds. A CLI failure is shown in the panel; a successful action can still
-take a moment to produce a new status packet.
+A later decoded status can correct an action transition if the earbuds report a
+different value. CLI failures are shown directly in the panel.
 
 ## Remove
 
