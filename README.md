@@ -17,9 +17,9 @@ plugin does not open Bluetooth or RFCOMM itself.
   when the connected model and decoded status support them
 - a shortcut to the full GalaxyBudsClient window
 
-Adaptive is displayed when reported, but it is not an explicit control.
-GalaxyBudsClient 5.2.1 does not expose an Adaptive setter through its public
-action interface.
+GalaxyBudsClient can decode Adaptive mode, so the panel displays it when
+reported. GalaxyBudsClient 5.2.1 cannot select Adaptive through its UI or
+public action interface.
 
 Bluetooth pairing, connection management, output selection, volume, and
 microphone controls remain in Omarchy's stock Bluetooth and Audio panels.
