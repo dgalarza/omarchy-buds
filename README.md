@@ -9,7 +9,7 @@ plugin does not open Bluetooth or RFCOMM itself.
 
 ## Preview
 
-![Galaxy Buds panel showing battery levels and earbud controls](docs/images/panel.png)
+![Galaxy Buds panel showing battery levels and earbud controls](preview.png)
 
 ## What the MVP includes
 
@@ -45,7 +45,7 @@ Quickshell 0.3.0, and GalaxyBudsClient 5.2.1.
 Clone the plugin through Omarchy without enabling it yet:
 
 ```bash
-omarchy plugin add https://github.com/dgalarza/omarchy-buds
+omarchy plugin add https://github.com/dgalarza/omarchy-buds.git
 ```
 
 Install the status hook:
@@ -98,8 +98,9 @@ $XDG_STATE_HOME/omarchy-buds/status.json
 The hook restricts the state directory to the current user (`0700`) and the
 snapshot to user read/write access (`0600`).
 
-`Service.qml` watches that file with Quickshell `FileView`. It also checks that
-GalaxyBudsClient still owns `me.timschneeberger.GalaxyBudsClient` on the user
+`BarWidget.qml` owns the bar icon and forwards the standard panel lifecycle to
+`Panel.qml`. `Service.qml` watches the status file with Quickshell `FileView`.
+It also checks that GalaxyBudsClient still owns `me.timschneeberger.GalaxyBudsClient` on the user
 bus and matches the bus owner's process ID to the snapshot writer. A bus owner
 change triggers an immediate check; a 30-second poll is retained as a recovery
 fallback for the monitor. A snapshot left behind by a crash is therefore
@@ -206,11 +207,12 @@ No check requires installing or enabling the plugin:
 ```bash
 omarchy plugin validate .
 deno run --allow-read tests/model.test.js
+deno run --allow-read tests/plugin-contract.test.js
 deno run --allow-read tests/hook-contract.test.js
 deno run --allow-read tests/service-contract.test.js
 dotnet run --project tests/hook/HookTests.csproj
 bash -n setup
-qmllint -I /usr/share/omarchy/shell Panel.qml Service.qml GalaxyBudsIcon.qml
+qmllint -I /usr/share/omarchy/shell BarWidget.qml Panel.qml Service.qml GalaxyBudsIcon.qml
 ```
 
 The hook behavior harness requires the .NET 10 SDK; end users only need the
@@ -218,8 +220,10 @@ GalaxyBudsClient package listed above.
 
 `tests/model.test.js` covers complete, partial, absent, malformed, and
 unsupported-version status input, all control fields, and process-owner
-matching. `tests/hook-contract.test.js` protects the device-response
-subscriptions and atomic-write contract without loading GalaxyBudsClient.
+matching. `tests/plugin-contract.test.js` protects the marketplace bar-widget
+entry point, nested-panel lifecycle, and root preview. `tests/hook-contract.test.js`
+protects the device-response subscriptions and atomic-write contract without
+loading GalaxyBudsClient.
 The .NET harness compiles the production hook against local client stubs and
 exercises acknowledgement values, decoded-state reconciliation, and private
 permissions. `tests/service-contract.test.js` protects the narrow D-Bus owner

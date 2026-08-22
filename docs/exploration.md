@@ -165,6 +165,7 @@ The initial repository should follow the current shell panel idiom:
 
 ```text
 manifest.json
+BarWidget.qml
 Panel.qml
 Service.qml
 Model.js

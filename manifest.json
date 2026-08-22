@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.dgalarza.omarchy-buds",
   "name": "Galaxy Buds",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "author": "Damian Galarza",
   "license": "MIT",
   "description": "Galaxy Buds battery and selected controls through GalaxyBudsClient.",
@@ -10,7 +10,7 @@
     "bar-widget"
   ],
   "entryPoints": {
-    "barWidget": "Panel.qml"
+    "barWidget": "BarWidget.qml"
   },
   "barWidget": {
     "displayName": "Galaxy Buds",

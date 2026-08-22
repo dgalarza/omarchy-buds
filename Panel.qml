@@ -10,18 +10,40 @@ Panel {
   id: root
 
   moduleName: "io.github.dgalarza.omarchy-buds"
-  ipcTarget: "io.github.dgalarza.omarchy-buds"
+  manageIpc: false
 
+  property var anchorItem: null
+  property var hostWidget: null
   property int cursorIndex: 0
   property bool cursorActive: false
 
+  readonly property var barIdentity: hostWidget || root
+  readonly property bool connected: buds.connected
   readonly property bool hideWhenDisconnected: setting("hideWhenDisconnected", true) === true
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.45)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property color iconColor: buds.connected ? barForeground : Qt.darker(barForeground, 1.6)
   readonly property int lowBatteryPercent: 20
+
+  function open() {
+    root.controller.show()
+  }
+
+  function close() {
+    root.controller.hide()
+  }
+
+  function toggle() {
+    if (root.opened) root.close()
+    else root.open()
+  }
+
+  function switchPanel(direction) {
+    if (root.bar && typeof root.bar.switchPanelFrom === "function")
+      return root.bar.switchPanelFrom(root.barIdentity, direction)
+    return false
+  }
 
   readonly property string modelDisplay: Model.modelName(buds.model)
   readonly property bool hasNoiseSection: buds.connected
@@ -104,10 +126,6 @@ Panel {
     return ""
   }
 
-  visible: !hideWhenDisconnected || buds.connected
-  implicitWidth: button.implicitWidth
-  implicitHeight: button.implicitHeight
-
   onOpenedChanged: if (opened) {
     cursorIndex = 0
     cursorActive = false
@@ -120,24 +138,10 @@ Panel {
     settings: root.settings
   }
 
-  BarIconButton {
-    id: button
-    anchors.fill: parent
-    bar: root.bar
-    iconComponent: Component {
-      GalaxyBudsIcon {
-        anchors.centerIn: parent
-        iconSize: Math.min(parent.width, parent.height) * 0.92
-        color: root.iconColor
-      }
-    }
-    onPressed: root.toggle()
-  }
-
   KeyboardPanel {
     id: panel
-    anchorItem: button
-    owner: root
+    anchorItem: root.anchorItem
+    owner: root.barIdentity
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
