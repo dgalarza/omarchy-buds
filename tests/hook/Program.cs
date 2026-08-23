@@ -36,6 +36,12 @@ internal static class Program
         return snapshot.RootElement.GetProperty(section).GetProperty(property).GetBoolean();
     }
 
+    private static string StringValue(string section, string property)
+    {
+        using var snapshot = Snapshot();
+        return snapshot.RootElement.GetProperty(section).GetProperty(property).GetString() ?? "";
+    }
+
     private static AcknowledgementDecoder SimpleAcknowledgement(MsgIds id, byte value) => new()
     {
         Id = id,
@@ -88,6 +94,8 @@ internal static class Program
         Check("initial decoded noise mode is published", IntValue("noise_control", "mode") == 0);
         Check("initial decoded equalizer is published",
             BoolValue("equalizer", "enabled") && IntValue("equalizer", "preset") == 2);
+        Check("Buds4 Pro retains GalaxyBudsClient's touch-lock action",
+            StringValue("actions", "touch_lock_toggle") == "LockTouchpadToggle");
 
         receiver.RaiseAcknowledgement(SimpleAcknowledgement(MsgIds.NOISE_CONTROLS, 1));
         Check("noise-control acknowledgement applies returned mode",
@@ -135,11 +143,34 @@ internal static class Program
         receiver.RaiseAcknowledgement(new AcknowledgementDecoder
         {
             Id = MsgIds.LOCK_TOUCHPAD,
+            Parameters = new LockTouchpadAckParameter { TouchpadLock = false },
+            RawParameters = new byte[] { 0 }
+        });
+        Check("advanced touch-lock acknowledgement inverts touch-enabled state",
+            BoolValue("touch_lock", "enabled"));
+        receiver.RaiseAcknowledgement(new AcknowledgementDecoder
+        {
+            Id = MsgIds.LOCK_TOUCHPAD,
             Parameters = new LockTouchpadAckParameter { TouchpadLock = true },
             RawParameters = new byte[] { 1 }
         });
-        Check("touch-lock acknowledgement applies returned state",
+        Check("advanced touch-unlock acknowledgement clears locked state",
+            !BoolValue("touch_lock", "enabled"));
+
+        bluetooth.CurrentModel = Models.Buds;
+        bluetooth.DeviceSpec.SupportedFeatures.Remove(Features.AdvancedTouchLock);
+        receiver.RaiseAcknowledgement(new AcknowledgementDecoder
+        {
+            Id = MsgIds.LOCK_TOUCHPAD,
+            Parameters = new LockTouchpadAckParameter { TouchpadLock = true },
+            RawParameters = new byte[] { 1 }
+        });
+        Check("legacy touch-lock acknowledgement keeps direct lock state",
             BoolValue("touch_lock", "enabled"));
+        Check("legacy models retain the touch-lock action",
+            StringValue("actions", "touch_lock_toggle") == "LockTouchpadToggle");
+        bluetooth.DeviceSpec.SupportedFeatures.Add(Features.AdvancedTouchLock);
+        bluetooth.CurrentModel = Models.Buds4Pro;
 
         receiver.RaiseAcknowledgement(SimpleAcknowledgement(MsgIds.SET_DETECT_CONVERSATIONS, 1));
         Check("conversation acknowledgement applies returned state",

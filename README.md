@@ -142,7 +142,7 @@ authoritative.
 | `n` | Toggle noise cancellation |
 | `a` | Toggle ambient sound |
 | `e` | Toggle the equalizer |
-| `l` | Toggle touch lock |
+| `t` | Toggle touch lock |
 | `c` | Toggle conversation detection |
 | `o` | Toggle one-earbud noise control |
 | `g` | Open GalaxyBudsClient |
@@ -179,6 +179,10 @@ The panel does not assume that a locally dispatched action reached the earbuds.
 It keeps the previous value if GalaxyBudsClient reports a CLI failure or the
 hook receives no matching device response. Check GalaxyBudsClient's log for a
 Bluetooth or protocol error.
+
+Touch lock uses GalaxyBudsClient's `LockTouchpadToggle` action. If touch lock is
+also ineffective in the full client for a particular model or firmware, this
+plugin cannot work around it without bypassing GalaxyBudsClient.
 
 ## Remove
 

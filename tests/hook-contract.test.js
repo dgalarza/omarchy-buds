@@ -43,13 +43,17 @@ for (const message of [
 contains("noise acknowledgements apply the returned mode", "ApplyNoiseControlModeLocked(noiseMode.Value)")
 contains("legacy ANC responses apply the returned value", "ApplyAncEnabledLocked(ancEnabled.Value != 0)")
 contains("equalizer acknowledgements use returned bytes", "ApplyEqualizerConfirmationLocked(acknowledgement.RawParameters)")
-contains("touch-lock acknowledgements use returned state", "_touchLocked = touchLock.TouchpadLock")
+contains("touch-lock acknowledgements normalize returned state",
+  "_touchLocked = TouchLockFromAcknowledgement(touchLock)")
+contains("advanced touch-lock acknowledgements invert touch-enabled state",
+  "return Supports(Features.AdvancedTouchLock)\n            ? !touchLock.TouchpadLock\n            : touchLock.TouchpadLock")
 contains("conversation acknowledgements use returned state", "_conversationDetection = conversationDetection.Value != 0")
 contains("one-earbud acknowledgements use returned state", "_oneEarbudNoiseControl = oneEarbud.Value != 0")
 
 check("local action dispatch is not treated as device state",
   !source.includes("EventDispatcher.Instance.EventReceived"))
-check("toggle inversion is absent from the hook", !source.includes(" = !_"))
+check("local state is never toggled speculatively",
+  !source.includes("_touchLocked = !_touchLocked"))
 
 contains("state directory permissions are restricted",
   "File.SetUnixFileMode(directory, StateDirectoryMode)")

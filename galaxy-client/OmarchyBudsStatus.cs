@@ -230,7 +230,7 @@ public class OmarchyBudsStatus : IHook
                 case MsgIds.LOCK_TOUCHPAD:
                     if (acknowledgement.Parameters is LockTouchpadAckParameter touchLock)
                     {
-                        _touchLocked = touchLock.TouchpadLock;
+                        _touchLocked = TouchLockFromAcknowledgement(touchLock);
                         confirmed = true;
                     }
                     break;
@@ -345,6 +345,15 @@ public class OmarchyBudsStatus : IHook
         _equalizerEnabled = mode != 0;
         _equalizerPreset = mode == 0 ? 2 : mode - 1;
         return true;
+    }
+
+    private bool TouchLockFromAcknowledgement(LockTouchpadAckParameter touchLock)
+    {
+        // AdvancedTouchLock sends and acknowledges whether touch input is
+        // enabled, while older devices acknowledge whether it is locked.
+        return Supports(Features.AdvancedTouchLock)
+            ? !touchLock.TouchpadLock
+            : touchLock.TouchpadLock;
     }
 
     private bool Supports(Features feature)

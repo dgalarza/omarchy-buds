@@ -151,7 +151,8 @@ namespace GalaxyBudsClient.Model.Specifications
         AmbientSound,
         DetectConversations,
         NoiseControlsWithOneEarbud,
-        CaseBattery
+        CaseBattery,
+        AdvancedTouchLock
     }
 
     public enum TrayItemTypes
