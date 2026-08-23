@@ -48,9 +48,9 @@ check("nested panel accepts its host widget",
 check("nested panel anchors KeyboardPanel to the bar button",
   panel.includes("anchorItem: root.anchorItem"))
 check("cursor navigation scrolls the selected row into view",
-  panel.includes("function ensureCursorVisible()")
-  && panel.includes("item.mapToItem(panelColumn, 0, 0)")
-  && panel.includes("Qt.callLater(root.ensureCursorVisible)"))
+  panel.includes("function ensureCursorVisible(item)")
+  && panel.includes("item.mapToItem(panelFlick.contentItem, 0, 0)")
+  && panel.includes("onHasCursorChanged: if (hasCursor) root.ensureCursorVisible"))
 check("touch lock uses a key not reserved by PanelKeyCatcher",
   panel.includes('key === "t" && buds.supportsTouchLock')
   && !panel.includes('key === "l" && buds.supportsTouchLock'))

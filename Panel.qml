@@ -89,33 +89,20 @@ Panel {
     return cursorActive && cursorRow === name
   }
 
-  function cursorItem(name) {
-    if (name === "anc") return ancRow
-    if (name === "ambient") return ambientRow
-    if (name === "equalizer") return equalizerRow
-    if (name === "touch") return touchRow
-    if (name === "conversation") return conversationRow
-    if (name === "one-earbud") return oneEarbudRow
-    if (name === "open-client") return openClientRow
-    return null
-  }
+  function ensureCursorVisible(item) {
+    if (!item || !panelFlick || !panelFlick.contentItem) return
 
-  function ensureCursorVisible() {
-    if (!cursorActive || !panelFlick) return
-
-    var item = cursorItem(cursorRow)
-    if (!item || item.visible !== true || item.height <= 0) return
-
-    var position = item.mapToItem(panelColumn, 0, 0)
+    var position = item.mapToItem(panelFlick.contentItem, 0, 0)
     var margin = Style.space(8)
-    var rowTop = Math.max(0, position.y - margin)
-    var rowBottom = position.y + item.height + margin
+    var rowTop = position.y
+    var rowBottom = rowTop + item.height
     var viewportTop = panelFlick.contentY
     var viewportBottom = viewportTop + panelFlick.height
     var nextY = viewportTop
 
-    if (rowTop < viewportTop) nextY = rowTop
-    else if (rowBottom > viewportBottom) nextY = rowBottom - panelFlick.height
+    if (rowTop < viewportTop + margin) nextY = rowTop - margin
+    else if (rowBottom > viewportBottom - margin)
+      nextY = rowBottom + margin - panelFlick.height
 
     var maximumY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
     panelFlick.contentY = Math.max(0, Math.min(maximumY, nextY))
@@ -126,14 +113,12 @@ Panel {
     if (index < 0) return
     cursorActive = true
     cursorIndex = index
-    Qt.callLater(root.ensureCursorVisible)
   }
 
   function moveCursor(delta) {
     if (cursorRows.length === 0) return
     cursorActive = true
     cursorIndex = Math.max(0, Math.min(cursorRows.length - 1, cursorIndex + delta))
-    Qt.callLater(root.ensureCursorVisible)
   }
 
   function activateCursor() {
@@ -326,7 +311,6 @@ Panel {
             }
 
             ToggleRow {
-              id: ancRow
               visible: buds.supportsAnc
               height: visible ? implicitHeight : 0
               width: parent.width
@@ -338,7 +322,6 @@ Panel {
             }
 
             ToggleRow {
-              id: ambientRow
               visible: buds.supportsAmbient
               height: visible ? implicitHeight : 0
               width: parent.width
@@ -377,7 +360,6 @@ Panel {
             }
 
             ToggleRow {
-              id: equalizerRow
               visible: buds.supportsEqualizer
               height: visible ? implicitHeight : 0
               width: parent.width
@@ -391,7 +373,6 @@ Panel {
             }
 
             ToggleRow {
-              id: touchRow
               visible: buds.supportsTouchLock
               height: visible ? implicitHeight : 0
               width: parent.width
@@ -403,7 +384,6 @@ Panel {
             }
 
             ToggleRow {
-              id: conversationRow
               visible: buds.supportsConversationDetection
               height: visible ? implicitHeight : 0
               width: parent.width
@@ -415,7 +395,6 @@ Panel {
             }
 
             ToggleRow {
-              id: oneEarbudRow
               visible: buds.supportsOneEarbudNoiseControl
               height: visible ? implicitHeight : 0
               width: parent.width
@@ -449,7 +428,6 @@ Panel {
             }
 
             ActionRow {
-              id: openClientRow
               width: parent.width
               rowName: "open-client"
               label: "Open GalaxyBudsClient"
@@ -540,6 +518,7 @@ Panel {
     signal triggered()
 
     hasCursor: root.rowHasCursor(rowName)
+    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(toggleRow)
     foreground: root.foreground
     opacity: buds.busy ? 0.65 : 1.0
     implicitHeight: toggleContent.implicitHeight + Style.spacing.rowPaddingX
@@ -608,6 +587,7 @@ Panel {
     signal triggered()
 
     hasCursor: root.rowHasCursor(rowName)
+    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(actionRow)
     foreground: root.foreground
     opacity: buds.busy ? 0.65 : 1.0
     implicitHeight: actionContent.implicitHeight + Style.spacing.rowPaddingX
