@@ -9,7 +9,7 @@ plugin does not open Bluetooth or RFCOMM itself.
 
 ## Preview
 
-![Galaxy Buds panel showing battery levels and earbud controls](preview.png)
+<img src="preview.png" alt="Galaxy Buds panel showing battery levels and earbud controls" width="400">
 
 ## What the MVP includes
 
