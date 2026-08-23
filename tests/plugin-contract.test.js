@@ -16,6 +16,9 @@ function check(name, passed) {
 
 check("manifest uses the permanent plugin ID",
   manifest.id === "io.github.dgalarza.omarchy-buds")
+check("manifest uses the distinct public name",
+  manifest.name === "Omarchy Buds"
+  && manifest.barWidget?.displayName === "Omarchy Buds")
 check("manifest declares one bar-widget kind",
   JSON.stringify(manifest.kinds) === JSON.stringify(["bar-widget"]))
 check("manifest loads BarWidget.qml",

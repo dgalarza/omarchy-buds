@@ -1,7 +1,7 @@
 import QtQuick
 import qs.Ui
 
-// Bar entry point and lifecycle bridge for the Galaxy Buds details panel.
+// Bar entry point and lifecycle bridge for the Omarchy Buds details panel.
 BarWidget {
   id: root
 
@@ -67,7 +67,7 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    tooltipText: "Open Galaxy Buds"
+    tooltipText: "Open Omarchy Buds"
     iconComponent: Component {
       GalaxyBudsIcon {
         anchors.centerIn: parent

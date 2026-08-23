@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "id": "io.github.dgalarza.omarchy-buds",
-  "name": "Galaxy Buds",
-  "version": "0.2.1",
+  "name": "Omarchy Buds",
+  "version": "0.2.2",
   "author": "Damian Galarza",
   "license": "MIT",
-  "description": "Galaxy Buds battery and selected controls through GalaxyBudsClient.",
+  "description": "Galaxy Buds status and controls for Omarchy through GalaxyBudsClient.",
   "kinds": [
     "bar-widget"
   ],
@@ -13,8 +13,8 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Galaxy Buds",
-    "description": "Per-earbud battery, wear and charging state, noise mode, and GalaxyBudsClient actions.",
+    "displayName": "Omarchy Buds",
+    "description": "Per-earbud status and selected controls through GalaxyBudsClient, without a second Bluetooth connection.",
     "category": "Audio",
     "allowMultiple": false,
     "defaultSection": "right",

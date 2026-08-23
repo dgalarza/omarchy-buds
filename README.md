@@ -1,15 +1,14 @@
-# Galaxy Buds for Omarchy
+# Omarchy Buds
 
-An Omarchy Quattro bar plugin for Galaxy Buds. It shows per-earbud status and
-runs supported controls through
-[GalaxyBudsClient](https://github.com/timschneeb/GalaxyBudsClient).
+Omarchy Buds adds Galaxy Buds status and controls to the Omarchy Quattro bar
+through [GalaxyBudsClient](https://github.com/timschneeb/GalaxyBudsClient).
 
 GalaxyBudsClient remains the only owner of the Buds protocol connection. This
 plugin does not open Bluetooth or RFCOMM itself.
 
 ## Preview
 
-<img src="preview.png" alt="Galaxy Buds panel showing battery levels and earbud controls" width="400">
+<img src="preview.png" alt="Omarchy Buds panel showing battery levels and earbud controls" width="400">
 
 ## What the MVP includes
 
