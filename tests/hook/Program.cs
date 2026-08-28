@@ -42,6 +42,12 @@ internal static class Program
         return snapshot.RootElement.GetProperty(section).GetProperty(property).GetString() ?? "";
     }
 
+    private static string TopLevelString(string property)
+    {
+        using var snapshot = Snapshot();
+        return snapshot.RootElement.GetProperty(property).GetString() ?? "";
+    }
+
     private static AcknowledgementDecoder SimpleAcknowledgement(MsgIds id, byte value) => new()
     {
         Id = id,
@@ -58,11 +64,11 @@ internal static class Program
         var bluetooth = BluetoothImpl.Instance;
         bluetooth.IsConnected = true;
         bluetooth.CurrentModel = Models.Buds4Pro;
-        bluetooth.DeviceName = "Test Buds";
+        bluetooth.DeviceName = new string('N', 512);
         bluetooth.Device.Current = new DeviceStub
         {
             Name = "Test Buds",
-            MacAddress = "00:11:22:33:44:55"
+            MacAddress = new string('A', 256)
         };
         foreach (var feature in Enum.GetValues<Features>())
             bluetooth.DeviceSpec.SupportedFeatures.Add(feature);
@@ -91,6 +97,11 @@ internal static class Program
         hook.OnHooked();
 
         Check("initial snapshot exists", File.Exists(_statusPath));
+        Check("producer bounds the device name",
+            TopLevelString("device_name").Length == 128);
+        Check("producer bounds the address",
+            TopLevelString("address").Length == 64);
+        Check("producer bounds the encoded snapshot", new FileInfo(_statusPath).Length <= 4096);
         Check("initial decoded noise mode is published", IntValue("noise_control", "mode") == 0);
         Check("initial decoded equalizer is published",
             BoolValue("equalizer", "enabled") && IntValue("equalizer", "preset") == 2);

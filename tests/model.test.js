@@ -4,7 +4,8 @@
 const source = Deno.readTextFileSync(new URL("../Model.js", import.meta.url))
 const Model = new Function(source + `
   return {
-    parseStatus, batteryFrom, defaultBattery, defaultStatus, busctlProcessId,
+    parseStatus, parseBridgeResult, batteryFrom, defaultBattery, defaultStatus,
+    helperProcessId,
     snapshotIsCurrent, snapshotNeedsProbe,
     noiseModeName, modelName, equalizerPresetName,
     levelText, levelFraction, batteryMeta, hasAnyBattery, elideError,
@@ -12,7 +13,8 @@ const Model = new Function(source + `
     NOISE_AMBIENT, NOISE_ADAPTIVE, ACTION_ANC_TOGGLE,
     ACTION_AMBIENT_TOGGLE, ACTION_EQUALIZER_TOGGLE,
     ACTION_TOUCH_LOCK_TOGGLE, ACTION_CONVERSATION_TOGGLE,
-    ACTION_ONE_EARBUD_TOGGLE, MAX_ERROR_CHARS
+    ACTION_ONE_EARBUD_TOGGLE, BRIDGE_VERSION, MAX_BRIDGE_CHARS,
+    MAX_DEVICE_NAME_CHARS, MAX_ERROR_CHARS
   }
 `)()
 
@@ -127,6 +129,44 @@ check("disconnected snapshot parses", disconnected.ok, true)
 check("disconnected flag remains false", disconnected.connected, false)
 check("disconnected snapshot has no battery", Model.hasAnyBattery(disconnected), false)
 
+const bridged = Model.parseBridgeResult(JSON.stringify({
+  bridge_version: Model.BRIDGE_VERSION,
+  ok: true,
+  present: true,
+  status: JSON.parse(liveLine)
+}))
+check("canonical helper status parses", bridged.status.ok, true)
+check("canonical helper status is present", bridged.present, true)
+check("canonical helper status keeps its PID", bridged.status.processId, 4242)
+
+const missingBridge = Model.parseBridgeResult(JSON.stringify({
+  bridge_version: Model.BRIDGE_VERSION,
+  ok: false,
+  present: false,
+  error: "missing"
+}))
+check("missing helper status stays absent", missingBridge.present, false)
+check("missing helper status has no parse error", missingBridge.status.lastError, "")
+
+const symlinkBridge = Model.parseBridgeResult(JSON.stringify({
+  bridge_version: Model.BRIDGE_VERSION,
+  ok: false,
+  present: true,
+  error: "symlink"
+}))
+check("unsafe helper status is present but invalid", symlinkBridge.present, true)
+check("unsafe helper status is explained",
+  symlinkBridge.status.lastError,
+  "The GalaxyBudsClient status path is a symbolic link")
+
+const malformedBridge = Model.parseBridgeResult("not json")
+check("malformed helper output is rejected", malformedBridge.status.ok, false)
+truthy("malformed helper output carries an error", malformedBridge.status.lastError)
+
+const oversizedBridge = Model.parseBridgeResult("x".repeat(Model.MAX_BRIDGE_CHARS + 1))
+check("oversized helper output is rejected", oversizedBridge.status.ok, false)
+truthy("oversized helper output carries an error", oversizedBridge.status.lastError)
+
 // Every malformed or absent input returns the complete default shape and does
 // not throw. File absence itself is handled by Service.qml as a load failure.
 for (const [name, input] of [
@@ -186,10 +226,17 @@ check("invalid preset becomes unknown", malformedFields.equalizerPreset, -1)
 check("invalid capabilities stay false", malformedFields.supportsCaseBattery, false)
 check("unrecognized actions are dropped", malformedFields.actions, Model.defaultStatus().actions)
 
-check("busctl process ID parses", Model.busctlProcessId("PID=4242\nUID=1000\n"), 4242)
-check("busctl output must start a PID line", Model.busctlProcessId("PPID=42\nUID=1000\n"), -1)
-check("busctl process ID must be positive", Model.busctlProcessId("PID=0\n"), -1)
-check("busctl failure output has no process ID", Model.busctlProcessId("Failed to get credentials"), -1)
+const longIdentity = Model.parseStatus(JSON.stringify({
+  schema_version: 1,
+  device_name: "x".repeat(Model.MAX_DEVICE_NAME_CHARS + 1)
+}))
+check("overlong identity is dropped in the QML parser defense", longIdentity.deviceName, "")
+
+check("bounded helper process ID parses", Model.helperProcessId("4242\n"), 4242)
+check("extra owner output is rejected", Model.helperProcessId("4242\nUID=1000\n"), -1)
+check("owner process ID must be positive", Model.helperProcessId("0\n"), -1)
+check("owner probe failure output has no process ID",
+  Model.helperProcessId("Failed to get credentials"), -1)
 check("matching bus owner makes a snapshot current", Model.snapshotIsCurrent(live, 4242), true)
 check("different bus owner makes a snapshot stale", Model.snapshotIsCurrent(live, 4243), false)
 check("missing bus owner makes a snapshot stale", Model.snapshotIsCurrent(live, -1), false)

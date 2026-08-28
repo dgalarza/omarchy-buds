@@ -59,12 +59,18 @@ contains("state directory permissions are restricted",
   "File.SetUnixFileMode(directory, StateDirectoryMode)")
 contains("state file permissions are restricted",
   "File.SetUnixFileMode(_temporaryPath, StateFileMode)")
+contains("producer bounds device names", "MaxDeviceNameChars = 128")
+contains("producer bounds the encoded snapshot", "MaxSnapshotBytes = 4 * 1024")
+contains("producer checks the encoded snapshot size", "json.Length > MaxSnapshotBytes")
+contains("temporary files cannot replace an existing path", "FileMode.CreateNew")
 
-const serializeAt = source.indexOf("JsonSerializer.Serialize")
+const serializeAt = source.indexOf("JsonSerializer.SerializeToUtf8Bytes")
+const sizeCheckAt = source.indexOf("json.Length > MaxSnapshotBytes", serializeAt)
 const tempWriteAt = source.indexOf("new FileStream(", serializeAt)
 const durableFlushAt = source.indexOf("stream.Flush(true)", tempWriteAt)
 const atomicMoveAt = source.indexOf("File.Move(_temporaryPath, _statusPath, true)", durableFlushAt)
-check("snapshot serialization precedes the temporary write", serializeAt >= 0 && tempWriteAt > serializeAt)
+check("snapshot serialization precedes its size check", serializeAt >= 0 && sizeCheckAt > serializeAt)
+check("snapshot size is checked before the temporary write", tempWriteAt > sizeCheckAt)
 check("temporary snapshot is flushed before replacement", durableFlushAt > tempWriteAt)
 check("status replacement remains atomic", atomicMoveAt > durableFlushAt)
 

@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Text.Json;
 using GalaxyBudsClient.Message;
 using GalaxyBudsClient.Message.Decoder;
@@ -20,6 +19,11 @@ using GalaxyBudsClient.Scripting.Hooks;
 public class OmarchyBudsStatus : IHook
 {
     private const int SchemaVersion = 1;
+    private const int MaxSnapshotBytes = 4 * 1024;
+    private const int MaxDeviceNameChars = 128;
+    private const int MaxModelChars = 64;
+    private const int MaxAddressChars = 64;
+    private const int MaxPlacementChars = 32;
     private const UnixFileMode StateDirectoryMode = UnixFileMode.UserRead
         | UnixFileMode.UserWrite
         | UnixFileMode.UserExecute;
@@ -59,7 +63,10 @@ public class OmarchyBudsStatus : IHook
 
         var stateDirectory = Path.Combine(stateHome, "omarchy-buds");
         _statusPath = Path.Combine(stateDirectory, "status.json");
-        _temporaryPath = Path.Combine(stateDirectory, ".status.json.tmp");
+        _temporaryPath = Path.Combine(
+            stateDirectory,
+            $".status.json.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp"
+        );
     }
 
     public void OnHooked()
@@ -393,8 +400,23 @@ public class OmarchyBudsStatus : IHook
             ["available"] = available,
             ["level"] = available ? level : -1,
             ["charging"] = available && charging,
-            ["placement"] = available ? placement.ToString() : string.Empty
+            ["placement"] = available
+                ? BoundedString(placement.ToString(), MaxPlacementChars)
+                : string.Empty
         };
+    }
+
+    private string BoundedString(string? value, int maximumChars)
+    {
+        if (string.IsNullOrEmpty(value))
+            return string.Empty;
+        if (value.Length <= maximumChars)
+            return value;
+
+        var length = maximumChars;
+        if (length > 0 && char.IsHighSurrogate(value[length - 1]))
+            length--;
+        return value.Substring(0, length);
     }
 
     private void ReadEqualizerState(
@@ -443,10 +465,15 @@ public class OmarchyBudsStatus : IHook
         var caseAvailable = supportsCaseBattery && caseLevel > 0 && caseLevel <= 100;
 
         var currentModel = _bluetooth.CurrentModel;
-        var model = currentModel == Models.NULL ? string.Empty : currentModel.ToString();
+        var model = currentModel == Models.NULL
+            ? string.Empty
+            : BoundedString(currentModel.ToString(), MaxModelChars);
         var currentDevice = _bluetooth.Device.Current;
-        var deviceName = connected ? _bluetooth.DeviceName : currentDevice?.Name ?? string.Empty;
-        var address = currentDevice?.MacAddress ?? string.Empty;
+        var deviceName = BoundedString(
+            connected ? _bluetooth.DeviceName : currentDevice?.Name,
+            MaxDeviceNameChars
+        );
+        var address = BoundedString(currentDevice?.MacAddress, MaxAddressChars);
 
         return new Dictionary<string, object>
         {
@@ -514,18 +541,23 @@ public class OmarchyBudsStatus : IHook
 
             Directory.CreateDirectory(directory);
             File.SetUnixFileMode(directory, StateDirectoryMode);
-            var json = JsonSerializer.Serialize(BuildSnapshot(connected));
+            var json = JsonSerializer.SerializeToUtf8Bytes(BuildSnapshot(connected));
+            if (json.Length > MaxSnapshotBytes)
+            {
+                Logger.Error(
+                    $"Could not publish status: snapshot exceeds {MaxSnapshotBytes} bytes"
+                );
+                return;
+            }
 
             using (var stream = new FileStream(
                 _temporaryPath,
-                FileMode.Create,
+                FileMode.CreateNew,
                 FileAccess.Write,
                 FileShare.None))
-            using (var writer = new StreamWriter(stream, new UTF8Encoding(false), 1024, true))
             {
                 File.SetUnixFileMode(_temporaryPath, StateFileMode);
-                writer.Write(json);
-                writer.Flush();
+                stream.Write(json, 0, json.Length);
                 stream.Flush(true);
             }
 
