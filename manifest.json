@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.dgalarza.omarchy-buds",
   "name": "Omarchy Buds",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "author": "Damian Galarza",
   "license": "MIT",
   "description": "Galaxy Buds status and controls for Omarchy through GalaxyBudsClient.",

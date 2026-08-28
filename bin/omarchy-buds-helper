@@ -1,0 +1,689 @@
+#!/usr/bin/perl
+
+package OmarchyBudsHelper;
+
+use strict;
+use warnings;
+
+use B ();
+use Encode qw(decode encode FB_CROAK FB_DEFAULT LEAVE_SRC);
+use Errno qw(EAGAIN EWOULDBLOCK ELOOP ENOENT ENOTDIR);
+use Fcntl qw(:DEFAULT :mode F_GETFL F_SETFL O_NONBLOCK O_NOFOLLOW);
+use IO::Select;
+use IPC::Open3;
+use JSON::PP ();
+use POSIX qw(WNOHANG);
+use Symbol qw(gensym);
+use Time::HiRes qw(sleep time);
+
+use constant BRIDGE_VERSION => 1;
+use constant STATUS_SCHEMA => 1;
+use constant MAX_STATUS_BYTES => 8 * 1024;
+use constant MAX_CANONICAL_BYTES => 4 * 1024;
+use constant MAX_JSON_DEPTH => 10;
+use constant MAX_GENERIC_STRING_CHARS => 256;
+use constant MAX_KEY_CHARS => 64;
+use constant MAX_DEVICE_NAME_CHARS => 128;
+use constant MAX_MODEL_CHARS => 64;
+use constant MAX_ADDRESS_CHARS => 64;
+use constant MAX_PLACEMENT_CHARS => 32;
+use constant MAX_WRITTEN_AT_CHARS => 64;
+use constant MAX_ACTION_ERROR_CHARS => 160;
+use constant WATCH_INTERVAL_SECONDS => 0.25;
+use constant WATCH_RUNTIME_SECONDS => 300;
+use constant COMMAND_RUNTIME_SECONDS => 5;
+use constant PROBE_RUNTIME_SECONDS => 2;
+use constant COMMAND_OUTPUT_BYTES => 1024;
+use constant PROBE_OUTPUT_BYTES => 256;
+use constant MONITOR_WINDOW_SECONDS => 5;
+use constant MONITOR_WINDOW_BYTES => 32 * 1024;
+use constant MONITOR_WINDOW_EVENTS => 32;
+use constant MONITOR_PENDING_BYTES => 4096;
+
+my $JSON = JSON::PP->new->canonical(1)->allow_nonref(0)->max_depth(MAX_JSON_DEPTH);
+
+sub _status_error {
+    die "STATUS:$_[0]\n";
+}
+
+sub _scalar_flags {
+    return B::svref_2object(\$_[0])->FLAGS;
+}
+
+sub _is_json_string {
+    return 0 if !defined($_[0]) || ref($_[0]);
+    return (_scalar_flags($_[0]) & B::SVp_POK()) != 0;
+}
+
+sub _is_json_number {
+    return 0 if !defined($_[0]) || ref($_[0]);
+    return (_scalar_flags($_[0]) & (B::SVp_IOK() | B::SVp_NOK())) != 0;
+}
+
+sub _is_json_integer {
+    return 0 unless _is_json_number($_[0]);
+    return $_[0] == int($_[0]);
+}
+
+sub _validate_tree {
+    my ($value, $depth) = @_;
+    _status_error("too_deep") if $depth > MAX_JSON_DEPTH;
+
+    if (!defined($value) || JSON::PP::is_bool($value) || _is_json_number($value)) {
+        return;
+    }
+
+    if (_is_json_string($value)) {
+        _status_error("long_string") if length($value) > MAX_GENERIC_STRING_CHARS;
+        return;
+    }
+
+    if (ref($value) eq "HASH") {
+        for my $key (keys %{$value}) {
+            _status_error("long_key") if length($key) > MAX_KEY_CHARS;
+            _validate_tree($value->{$key}, $depth + 1);
+        }
+        return;
+    }
+
+    if (ref($value) eq "ARRAY") {
+        _validate_tree($_, $depth + 1) for @{$value};
+        return;
+    }
+
+    _status_error("invalid_field");
+}
+
+sub _object_field {
+    my ($object, $key) = @_;
+    return {} unless exists $object->{$key};
+    _status_error("invalid_field") unless ref($object->{$key}) eq "HASH";
+    return $object->{$key};
+}
+
+sub _string_field {
+    my ($object, $key, $default, $maximum) = @_;
+    return $default unless exists $object->{$key};
+    my $value = $object->{$key};
+    _status_error("invalid_field") unless _is_json_string($value);
+    _status_error("long_string") if length($value) > $maximum;
+    return $value;
+}
+
+sub _integer_field {
+    my ($object, $key, $default, $minimum, $maximum) = @_;
+    return $default unless exists $object->{$key};
+    my $value = $object->{$key};
+    _status_error("invalid_field") unless _is_json_integer($value);
+    return $default if $value < $minimum || $value > $maximum;
+    return int($value);
+}
+
+sub _boolean_field {
+    my ($object, $key, $default) = @_;
+    return $default ? JSON::PP::true : JSON::PP::false unless exists $object->{$key};
+    my $value = $object->{$key};
+    _status_error("invalid_field") unless JSON::PP::is_bool($value);
+    return $value ? JSON::PP::true : JSON::PP::false;
+}
+
+sub _battery {
+    my ($object) = @_;
+    my $available = _boolean_field($object, "available", 0);
+    my $level = _integer_field($object, "level", -1, -1, 100);
+    my $charging = _boolean_field($object, "charging", 0);
+    my $placement = _string_field(
+        $object,
+        "placement",
+        "",
+        MAX_PLACEMENT_CHARS
+    );
+
+    if (!$available || $level < 0) {
+        return {
+            available => JSON::PP::false,
+            charging => JSON::PP::false,
+            level => -1,
+            placement => ""
+        };
+    }
+
+    return {
+        available => JSON::PP::true,
+        charging => $charging,
+        level => $level,
+        placement => $placement
+    };
+}
+
+sub _action {
+    my ($object, $key, $expected) = @_;
+    my $value = _string_field($object, $key, "", 64);
+    return $value eq $expected ? $expected : "";
+}
+
+sub canonical_status {
+    my ($parsed) = @_;
+    _status_error("invalid_json") unless ref($parsed) eq "HASH";
+    _validate_tree($parsed, 0);
+
+    _status_error("invalid_schema") unless exists $parsed->{schema_version};
+    _status_error("invalid_schema") unless _is_json_integer($parsed->{schema_version});
+    _status_error("invalid_schema") unless $parsed->{schema_version} == STATUS_SCHEMA;
+
+    my $battery = _object_field($parsed, "battery");
+    my $capabilities = _object_field($parsed, "capabilities");
+    my $noise = _object_field($parsed, "noise_control");
+    my $equalizer = _object_field($parsed, "equalizer");
+    my $touch_lock = _object_field($parsed, "touch_lock");
+    my $conversation = _object_field($parsed, "conversation_detection");
+    my $one_earbud = _object_field($parsed, "one_earbud_noise_control");
+    my $actions = _object_field($parsed, "actions");
+
+    my $process_id = _integer_field($parsed, "process_id", -1, 1, 2_147_483_647);
+    my $noise_mode = _integer_field($noise, "mode", -1, -1, 3);
+    my $equalizer_preset = _integer_field($equalizer, "preset", -1, -1, 4);
+
+    return {
+        schema_version => STATUS_SCHEMA,
+        written_at => _string_field(
+            $parsed,
+            "written_at",
+            "",
+            MAX_WRITTEN_AT_CHARS
+        ),
+        process_id => $process_id,
+        connected => _boolean_field($parsed, "connected", 0),
+        device_name => _string_field(
+            $parsed,
+            "device_name",
+            "",
+            MAX_DEVICE_NAME_CHARS
+        ),
+        model => _string_field($parsed, "model", "", MAX_MODEL_CHARS),
+        address => _string_field($parsed, "address", "", MAX_ADDRESS_CHARS),
+        battery => {
+            left => _battery(_object_field($battery, "left")),
+            right => _battery(_object_field($battery, "right")),
+            case => _battery(_object_field($battery, "case"))
+        },
+        capabilities => {
+            case_battery => _boolean_field($capabilities, "case_battery", 0)
+        },
+        noise_control => { mode => $noise_mode },
+        equalizer => {
+            enabled => _boolean_field($equalizer, "enabled", 0),
+            preset => $equalizer_preset
+        },
+        touch_lock => {
+            enabled => _boolean_field($touch_lock, "enabled", 0)
+        },
+        conversation_detection => {
+            enabled => _boolean_field($conversation, "enabled", 0)
+        },
+        one_earbud_noise_control => {
+            enabled => _boolean_field($one_earbud, "enabled", 0)
+        },
+        actions => {
+            anc_toggle => _action($actions, "anc_toggle", "AncToggle"),
+            ambient_toggle => _action($actions, "ambient_toggle", "AmbientToggle"),
+            equalizer_toggle => _action($actions, "equalizer_toggle", "EqualizerToggle"),
+            touch_lock_toggle => _action(
+                $actions,
+                "touch_lock_toggle",
+                "LockTouchpadToggle"
+            ),
+            conversation_detection_toggle => _action(
+                $actions,
+                "conversation_detection_toggle",
+                "ToggleConversationDetect"
+            ),
+            one_earbud_noise_control_toggle => _action(
+                $actions,
+                "one_earbud_noise_control_toggle",
+                "SwitchAncOne"
+            )
+        }
+    };
+}
+
+sub read_status {
+    my ($path) = @_;
+    _status_error("missing") unless defined($path) && length($path) > 0;
+
+    my $flags = O_RDONLY | O_NONBLOCK | O_NOFOLLOW;
+    my $opened = sysopen(my $handle, $path, $flags);
+    if (!$opened) {
+        _status_error("missing") if $! == ENOENT || $! == ENOTDIR;
+        _status_error("symlink") if $! == ELOOP;
+        _status_error("unreadable");
+    }
+
+    binmode($handle, ":raw");
+    my @metadata = stat($handle);
+    _status_error("unreadable") unless @metadata;
+    _status_error("not_regular") unless S_ISREG($metadata[2]);
+    _status_error("oversized") if $metadata[7] > MAX_STATUS_BYTES;
+
+    my $bytes = "";
+    while (length($bytes) <= MAX_STATUS_BYTES) {
+        my $remaining = MAX_STATUS_BYTES + 1 - length($bytes);
+        my $count = sysread($handle, my $chunk, $remaining);
+        if (!defined($count)) {
+            next if $! == EAGAIN || $! == EWOULDBLOCK;
+            _status_error("unreadable");
+        }
+        last if $count == 0;
+        $bytes .= $chunk;
+    }
+    close($handle);
+
+    _status_error("oversized") if length($bytes) > MAX_STATUS_BYTES;
+
+    my $text;
+    eval {
+        $text = decode("UTF-8", $bytes, FB_CROAK | LEAVE_SRC);
+        1;
+    } or _status_error("invalid_utf8");
+
+    my $parsed;
+    eval {
+        $parsed = $JSON->decode($text);
+        1;
+    } or _status_error("invalid_json");
+
+    return canonical_status($parsed);
+}
+
+sub status_envelope {
+    my ($path) = @_;
+    my $status;
+    my $ok = eval {
+        $status = read_status($path);
+        1;
+    };
+
+    if ($ok) {
+        return {
+            bridge_version => BRIDGE_VERSION,
+            ok => JSON::PP::true,
+            present => JSON::PP::true,
+            status => $status
+        };
+    }
+
+    my $error = $@;
+    my ($code) = $error =~ /STATUS:([a-z0-9_]+)/;
+    $code ||= "unreadable";
+    return {
+        bridge_version => BRIDGE_VERSION,
+        ok => JSON::PP::false,
+        present => $code eq "missing" ? JSON::PP::false : JSON::PP::true,
+        error => $code
+    };
+}
+
+sub encode_envelope {
+    my ($envelope) = @_;
+    my $bytes = encode("UTF-8", $JSON->encode($envelope));
+    if (length($bytes) > MAX_CANONICAL_BYTES) {
+        $bytes = encode("UTF-8", $JSON->encode({
+            bridge_version => BRIDGE_VERSION,
+            ok => JSON::PP::false,
+            present => JSON::PP::true,
+            error => "oversized_output"
+        }));
+    }
+    return $bytes;
+}
+
+sub _set_nonblocking {
+    my ($handle) = @_;
+    my $flags = fcntl($handle, F_GETFL, 0);
+    fcntl($handle, F_SETFL, $flags | O_NONBLOCK) if defined($flags);
+}
+
+sub _terminate_child {
+    my ($pid) = @_;
+    return undef unless $pid && $pid > 0;
+
+    kill "TERM", $pid;
+    for (1 .. 5) {
+        return $? if waitpid($pid, WNOHANG) == $pid;
+        sleep(0.02);
+    }
+    kill "KILL", $pid;
+    waitpid($pid, 0);
+    return $?;
+}
+
+sub run_bounded {
+    my (%options) = @_;
+    my $command = $options{command};
+    my $timeout = $options{timeout} // COMMAND_RUNTIME_SECONDS;
+    my $stdout_limit = $options{stdout_limit} // COMMAND_OUTPUT_BYTES;
+    my $stderr_limit = $options{stderr_limit} // COMMAND_OUTPUT_BYTES;
+
+    die "command must be an array reference\n"
+        unless ref($command) eq "ARRAY" && @{$command};
+
+    my ($child_in, $child_out);
+    my $child_error = gensym();
+    my $pid = eval { open3($child_in, $child_out, $child_error, @{$command}) };
+    if (!$pid) {
+        return {
+            exit_code => -1,
+            stdout => "",
+            stderr => "",
+            spawn_failed => 1,
+            timed_out => 0,
+            overflow => 0
+        };
+    }
+
+    close($child_in);
+    _set_nonblocking($child_out);
+    _set_nonblocking($child_error);
+
+    my $selector = IO::Select->new($child_out, $child_error);
+    my %kind = (
+        fileno($child_out) => "stdout",
+        fileno($child_error) => "stderr"
+    );
+    my %limit = (stdout => $stdout_limit, stderr => $stderr_limit);
+    my %captured = (stdout => "", stderr => "");
+    my $deadline = time() + $timeout;
+    my $timed_out = 0;
+    my $overflow = 0;
+    my $status;
+
+    while (1) {
+        if (time() >= $deadline) {
+            $timed_out = 1;
+            last;
+        }
+
+        for my $handle ($selector->can_read(0.05)) {
+            my $stream = $kind{fileno($handle)};
+            my $count = sysread($handle, my $chunk, 1024);
+            if (!defined($count)) {
+                next if $! == EAGAIN || $! == EWOULDBLOCK;
+                $selector->remove($handle);
+                close($handle);
+                next;
+            }
+            if ($count == 0) {
+                $selector->remove($handle);
+                close($handle);
+                next;
+            }
+
+            my $remaining = $limit{$stream} - length($captured{$stream});
+            if ($count > $remaining) {
+                $captured{$stream} .= substr($chunk, 0, $remaining) if $remaining > 0;
+                $overflow = 1;
+                last;
+            }
+            $captured{$stream} .= $chunk;
+        }
+        last if $overflow;
+
+        if (!defined($status)) {
+            my $waited = waitpid($pid, WNOHANG);
+            $status = $? if $waited == $pid;
+        }
+        last if defined($status) && $selector->count == 0;
+    }
+
+    if ($timed_out || $overflow) {
+        if (!defined($status)) {
+            $status = _terminate_child($pid);
+        } else {
+            for my $handle ($selector->handles) {
+                $selector->remove($handle);
+                close($handle);
+            }
+        }
+        $status = 0 unless defined($status);
+    } elsif (!defined($status)) {
+        waitpid($pid, 0);
+        $status = $?;
+    }
+
+    return {
+        exit_code => $status >> 8,
+        signal => $status & 127,
+        stdout => $captured{stdout},
+        stderr => $captured{stderr},
+        spawn_failed => 0,
+        timed_out => $timed_out,
+        overflow => $overflow
+    };
+}
+
+sub _sanitized_error {
+    my ($bytes) = @_;
+    my $text = decode("UTF-8", $bytes // "", FB_DEFAULT);
+    $text =~ s/[\x00-\x1f\x7f]/ /g;
+    $text =~ s/\s+/ /g;
+    $text =~ s/^\s+|\s+$//g;
+    if (length($text) > MAX_ACTION_ERROR_CHARS) {
+        $text = substr($text, 0, MAX_ACTION_ERROR_CHARS - 3) . "...";
+    }
+    return $text;
+}
+
+sub owner_pid {
+    my $result = run_bounded(
+        command => [
+            "/usr/bin/busctl",
+            "--user",
+            "call",
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "GetConnectionUnixProcessID",
+            "s",
+            "me.timschneeberger.GalaxyBudsClient"
+        ],
+        timeout => PROBE_RUNTIME_SECONDS,
+        stdout_limit => PROBE_OUTPUT_BYTES,
+        stderr_limit => PROBE_OUTPUT_BYTES
+    );
+
+    return undef if $result->{spawn_failed}
+        || $result->{timed_out}
+        || $result->{overflow}
+        || $result->{signal}
+        || $result->{exit_code} != 0;
+
+    return int($1) if $result->{stdout} =~ /\Au\s+([1-9][0-9]{0,9})\s*\z/;
+    return undef;
+}
+
+sub run_action {
+    my ($action) = @_;
+    my %commands = (
+        AncToggle => ["/usr/bin/galaxybudsclient", "action", "-e", "AncToggle"],
+        AmbientToggle => ["/usr/bin/galaxybudsclient", "action", "-e", "AmbientToggle"],
+        EqualizerToggle => ["/usr/bin/galaxybudsclient", "action", "-e", "EqualizerToggle"],
+        LockTouchpadToggle => ["/usr/bin/galaxybudsclient", "action", "-e", "LockTouchpadToggle"],
+        ToggleConversationDetect => [
+            "/usr/bin/galaxybudsclient",
+            "action",
+            "-e",
+            "ToggleConversationDetect"
+        ],
+        SwitchAncOne => ["/usr/bin/galaxybudsclient", "action", "-e", "SwitchAncOne"],
+        "open-client" => ["/usr/bin/galaxybudsclient", "app", "--activate-window"]
+    );
+
+    return (0, "Unsupported GalaxyBudsClient action") unless exists $commands{$action};
+
+    my $result = run_bounded(
+        command => $commands{$action},
+        timeout => COMMAND_RUNTIME_SECONDS,
+        stdout_limit => COMMAND_OUTPUT_BYTES,
+        stderr_limit => COMMAND_OUTPUT_BYTES
+    );
+
+    return (0, "Could not start GalaxyBudsClient") if $result->{spawn_failed};
+    return (0, "GalaxyBudsClient action timed out") if $result->{timed_out};
+    return (0, "GalaxyBudsClient produced too much action output") if $result->{overflow};
+    return (1, "") if !$result->{signal} && $result->{exit_code} == 0;
+
+    my $message = _sanitized_error($result->{stderr} || $result->{stdout});
+    $message ||= "GalaxyBudsClient rejected the action";
+    return (0, $message);
+}
+
+sub watch_status {
+    my ($path) = @_;
+    binmode(STDOUT, ":raw");
+    local $| = 1;
+    local $SIG{TERM} = sub { exit 0 };
+    local $SIG{INT} = sub { exit 0 };
+
+    my $last = "";
+    my $deadline = time() + WATCH_RUNTIME_SECONDS;
+    while (time() < $deadline) {
+        my $encoded = encode_envelope(status_envelope($path));
+        if ($encoded ne $last) {
+            print STDOUT $encoded, "\n";
+            $last = $encoded;
+        }
+        sleep(WATCH_INTERVAL_SECONDS);
+    }
+    return 0;
+}
+
+sub monitor_owner {
+    my @command = (
+        "/usr/bin/busctl",
+        "--user",
+        "--match=type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='me.timschneeberger.GalaxyBudsClient'",
+        "monitor"
+    );
+
+    my ($child_in, $child_out);
+    my $child_error = gensym();
+    my $pid = eval { open3($child_in, $child_out, $child_error, @command) };
+    return 1 unless $pid;
+
+    close($child_in);
+    _set_nonblocking($child_out);
+    _set_nonblocking($child_error);
+    binmode(STDOUT, ":raw");
+    local $| = 1;
+    local $SIG{TERM} = sub { _terminate_child($pid); exit 0 };
+    local $SIG{INT} = sub { _terminate_child($pid); exit 0 };
+
+    my $selector = IO::Select->new($child_out, $child_error);
+    my $stdout_fd = fileno($child_out);
+    my $pending = "";
+    my $deadline = time() + WATCH_RUNTIME_SECONDS;
+    my $window_started = time();
+    my $window_bytes = 0;
+    my $window_events = 0;
+    my $finished = 0;
+
+    while (time() < $deadline) {
+        if (time() - $window_started >= MONITOR_WINDOW_SECONDS) {
+            $window_started = time();
+            $window_bytes = 0;
+            $window_events = 0;
+        }
+
+        for my $handle ($selector->can_read(0.1)) {
+            my $count = sysread($handle, my $chunk, 1024);
+            if (!defined($count)) {
+                next if $! == EAGAIN || $! == EWOULDBLOCK;
+                $selector->remove($handle);
+                close($handle);
+                next;
+            }
+            if ($count == 0) {
+                $selector->remove($handle);
+                close($handle);
+                next;
+            }
+
+            $window_bytes += $count;
+            if ($window_bytes > MONITOR_WINDOW_BYTES) {
+                $finished = 1;
+                last;
+            }
+
+            next unless fileno($handle) == $stdout_fd;
+            $pending .= $chunk;
+            if (length($pending) > MONITOR_PENDING_BYTES) {
+                $finished = 1;
+                last;
+            }
+
+            while ($pending =~ s/\A([^\n]*)\n//) {
+                my $line = $1;
+                next unless index($line, "Member=NameOwnerChanged") >= 0;
+                $window_events++;
+                if ($window_events > MONITOR_WINDOW_EVENTS) {
+                    $finished = 1;
+                    last;
+                }
+                print STDOUT "changed\n";
+            }
+            last if $finished;
+        }
+        last if $finished;
+
+        my $waited = waitpid($pid, WNOHANG);
+        if ($waited == $pid) {
+            $pid = 0;
+            last;
+        }
+    }
+
+    _terminate_child($pid) if $pid;
+    return 0;
+}
+
+sub main {
+    my ($command, @arguments) = @_;
+    if (!defined($command)) {
+        return 64;
+    }
+
+    if ($command eq "status" && @arguments == 1) {
+        binmode(STDOUT, ":raw");
+        print STDOUT encode_envelope(status_envelope($arguments[0])), "\n";
+        return 0;
+    }
+
+    if ($command eq "watch-status" && @arguments == 1) {
+        return watch_status($arguments[0]);
+    }
+
+    if ($command eq "owner-pid" && @arguments == 0) {
+        my $pid = owner_pid();
+        return 1 unless defined($pid);
+        print STDOUT "$pid\n";
+        return 0;
+    }
+
+    if ($command eq "monitor-owner" && @arguments == 0) {
+        return monitor_owner();
+    }
+
+    if ($command eq "action" && @arguments == 1) {
+        my ($ok, $message) = run_action($arguments[0]);
+        print STDOUT "$message\n" unless $ok;
+        return $ok ? 0 : 1;
+    }
+
+    return 64;
+}
+
+unless (caller) {
+    exit main(@ARGV);
+}
+
+1;

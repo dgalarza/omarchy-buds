@@ -35,6 +35,7 @@ GalaxyBudsClient.
 - GalaxyBudsClient 5.2.1 or newer available as `galaxybudsclient`
 - Galaxy Buds already paired through BlueZ
 - `busctl`, supplied by the systemd package used by Omarchy
+- Perl, an explicit Omarchy package dependency
 
 The first version was checked against Omarchy 4.0 development packages,
 Quickshell 0.3.0, and GalaxyBudsClient 5.2.1.
@@ -98,20 +99,33 @@ The hook restricts the state directory to the current user (`0700`) and the
 snapshot to user read/write access (`0600`).
 
 `BarWidget.qml` owns the bar icon and forwards the standard panel lifecycle to
-`Panel.qml`. `Service.qml` watches the status file with Quickshell `FileView`.
-It also checks that GalaxyBudsClient still owns `me.timschneeberger.GalaxyBudsClient` on the user
-bus and matches the bus owner's process ID to the snapshot writer. A bus owner
-change triggers an immediate check; a 30-second poll is retained as a recovery
-fallback for the monitor. A snapshot left behind by a crash is therefore
-invalidated without waiting for the fallback poll.
+`Panel.qml`. `Service.qml` receives status only from the packaged
+`bin/omarchy-buds-helper`; QML never opens the GalaxyBudsClient-controlled state
+path. The helper opens the final path with `O_NOFOLLOW | O_NONBLOCK`, verifies
+the opened descriptor is a regular file, reads at most 8 KiB, validates UTF-8,
+JSON depth, schema, field types, and string limits, and emits at most 4 KiB of
+canonical JSON. Missing files, symlinks, special files, malformed documents,
+and oversized documents produce fixed bounded error states.
 
-Controls execute known `galaxybudsclient action -e ...` identifiers. The panel
-accepts only the identifiers its parser recognizes and only renders an action
-after the hook has observed a compatible device capability and an extended
-status update.
+The same helper contains the process-output boundary. Its owner probe calls the
+narrow session-bus `GetConnectionUnixProcessID` method instead of collecting
+`busctl status`. The owner monitor discards raw `busctl` output and emits only a
+fixed change token. Probes and actions have runtime and output ceilings; the
+long-running status and owner monitors rotate every five minutes and are
+restarted by `Service.qml`. A bus owner change still triggers an immediate
+probe, and a 30-second recovery poll remains enabled. The snapshot writer PID
+must match the current bus owner, so a file left by a crashed client is stale.
 
-The integration boundary is limited to `Service.qml` and
-`galaxy-client/OmarchyBudsStatus.cs`. Protocol decoding remains upstream.
+Controls execute known `galaxybudsclient action -e ...` identifiers through the
+helper's fixed argument allowlist. The panel accepts only the identifiers its
+parser recognizes and only renders an action after the hook has observed a
+compatible device capability and an extended status update. Raw successful
+command output is discarded; bounded sanitized failures are the only action
+output returned to QML.
+
+The replaceable integration boundary is limited to `Service.qml`,
+`bin/omarchy-buds-helper`, and `galaxy-client/OmarchyBudsStatus.cs`. Protocol
+decoding remains upstream.
 
 ## Update
 
@@ -213,6 +227,8 @@ deno run --allow-read tests/model.test.js
 deno run --allow-read tests/plugin-contract.test.js
 deno run --allow-read tests/hook-contract.test.js
 deno run --allow-read tests/service-contract.test.js
+perl -c bin/omarchy-buds-helper
+perl tests/helper.test.pl
 dotnet run --project tests/hook/HookTests.csproj
 bash -n setup
 qmllint -I /usr/share/omarchy/shell BarWidget.qml Panel.qml Service.qml GalaxyBudsIcon.qml
@@ -222,11 +238,14 @@ The hook behavior harness requires the .NET 10 SDK; end users only need the
 GalaxyBudsClient package listed above.
 
 `tests/model.test.js` covers complete, partial, absent, malformed, and
-unsupported-version status input, all control fields, and process-owner
-matching. `tests/plugin-contract.test.js` protects the marketplace bar-widget
-entry point, nested-panel lifecycle, and root preview. `tests/hook-contract.test.js`
-protects the device-response subscriptions and atomic-write contract without
-loading GalaxyBudsClient.
+unsupported-version status input, bounded helper envelopes, all control fields,
+and process-owner matching. `tests/helper.test.pl` covers regular no-follow
+status reads plus missing, symlink, FIFO, special-file, oversized, invalid
+UTF-8, malformed, deep, and long-string input. It also exercises command output
+and runtime ceilings. `tests/plugin-contract.test.js` protects the marketplace
+bar-widget entry point, nested-panel lifecycle, and root preview.
+`tests/hook-contract.test.js` protects the device-response subscriptions,
+producer ceilings, and atomic-write contract without loading GalaxyBudsClient.
 The .NET harness compiles the production hook against local client stubs and
 exercises acknowledgement values, decoded-state reconciliation, and private
 permissions. `tests/service-contract.test.js` protects the narrow D-Bus owner

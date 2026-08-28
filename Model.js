@@ -17,6 +17,13 @@ var ACTION_TOUCH_LOCK_TOGGLE = "LockTouchpadToggle"
 var ACTION_CONVERSATION_TOGGLE = "ToggleConversationDetect"
 var ACTION_ONE_EARBUD_TOGGLE = "SwitchAncOne"
 
+var BRIDGE_VERSION = 1
+var MAX_BRIDGE_CHARS = 4096
+var MAX_STATUS_CHARS = 4096
+var MAX_DEVICE_NAME_CHARS = 128
+var MAX_MODEL_CHARS = 64
+var MAX_ADDRESS_CHARS = 64
+var MAX_PLACEMENT_CHARS = 32
 var MAX_ERROR_CHARS = 160
 var ELIDED_ERROR_CHARS = 157
 
@@ -74,6 +81,10 @@ function stringOr(value, fallback) {
   return typeof value === "string" ? value : fallback
 }
 
+function boundedStringOr(value, fallback, maximum) {
+  return typeof value === "string" && value.length <= maximum ? value : fallback
+}
+
 function integerOr(value, fallback) {
   return typeof value === "number" && isFinite(value) && Math.floor(value) === value
     ? value
@@ -90,7 +101,7 @@ function batteryFrom(raw) {
   battery.available = true
   battery.level = level
   battery.charging = raw.charging === true
-  battery.placement = stringOr(raw.placement, "")
+  battery.placement = boundedStringOr(raw.placement, "", MAX_PLACEMENT_CHARS)
   return battery
 }
 
@@ -104,6 +115,11 @@ function parseStatus(raw) {
   var text = String(raw === undefined || raw === null ? "" : raw).trim()
   if (text === "") {
     status.lastError = "The GalaxyBudsClient status file is empty"
+    return status
+  }
+
+  if (text.length > MAX_STATUS_CHARS) {
+    status.lastError = "The GalaxyBudsClient status document exceeds the panel limit"
     return status
   }
 
@@ -135,13 +151,13 @@ function parseStatus(raw) {
   }
 
   status.ok = true
-  status.writtenAt = stringOr(parsed.written_at, "")
+  status.writtenAt = boundedStringOr(parsed.written_at, "", 64)
   var processId = integerOr(parsed.process_id, -1)
   status.processId = processId > 0 ? processId : -1
   status.connected = parsed.connected === true
-  status.deviceName = stringOr(parsed.device_name, "")
-  status.model = stringOr(parsed.model, "")
-  status.address = stringOr(parsed.address, "")
+  status.deviceName = boundedStringOr(parsed.device_name, "", MAX_DEVICE_NAME_CHARS)
+  status.model = boundedStringOr(parsed.model, "", MAX_MODEL_CHARS)
+  status.address = boundedStringOr(parsed.address, "", MAX_ADDRESS_CHARS)
 
   var battery = isObject(parsed.battery) ? parsed.battery : {}
   status.left = batteryFrom(battery.left)
@@ -182,8 +198,71 @@ function parseStatus(raw) {
   return status
 }
 
-function busctlProcessId(raw) {
-  var match = String(raw || "").match(/^PID=([1-9][0-9]*)$/m)
+function bridgeErrorMessage(code) {
+  if (code === "symlink")
+    return "The GalaxyBudsClient status path is a symbolic link"
+  if (code === "not_regular")
+    return "The GalaxyBudsClient status path is not a regular file"
+  if (code === "oversized")
+    return "The GalaxyBudsClient status file exceeds the 8 KiB input limit"
+  if (code === "invalid_utf8")
+    return "The GalaxyBudsClient status file is not valid UTF-8"
+  if (code === "invalid_schema")
+    return "The GalaxyBudsClient status file has an unsupported schema"
+  if (code === "too_deep")
+    return "The GalaxyBudsClient status document is too deeply nested"
+  if (code === "long_string" || code === "long_key")
+    return "The GalaxyBudsClient status document exceeds a field limit"
+  if (code === "invalid_json" || code === "invalid_field")
+    return "The GalaxyBudsClient status file is malformed"
+  if (code === "oversized_output")
+    return "The validated GalaxyBudsClient status exceeds the panel limit"
+  return "Could not safely read the GalaxyBudsClient status file"
+}
+
+function parseBridgeResult(raw) {
+  var result = { present: false, status: defaultStatus() }
+  var text = String(raw === undefined || raw === null ? "" : raw).trim()
+  if (text === "" || text.length > MAX_BRIDGE_CHARS) {
+    result.present = true
+    result.status.lastError = "Could not read a valid status-helper response"
+    return result
+  }
+
+  var message
+  try {
+    message = JSON.parse(text)
+  } catch (error) {
+    result.present = true
+    result.status.lastError = "Could not parse the status-helper response"
+    return result
+  }
+
+  if (!isObject(message) || message.bridge_version !== BRIDGE_VERSION
+      || typeof message.ok !== "boolean" || typeof message.present !== "boolean") {
+    result.present = true
+    result.status.lastError = "The status-helper response has an unsupported schema"
+    return result
+  }
+
+  result.present = message.present
+  if (message.ok === true) {
+    if (!message.present || !isObject(message.status)) {
+      result.present = true
+      result.status.lastError = "The status-helper response is incomplete"
+      return result
+    }
+    result.status = parseStatus(JSON.stringify(message.status))
+    return result
+  }
+
+  if (message.error !== "missing")
+    result.status.lastError = bridgeErrorMessage(stringOr(message.error, ""))
+  return result
+}
+
+function helperProcessId(raw) {
+  var match = String(raw || "").match(/^([1-9][0-9]{0,9})\s*$/)
   if (!match) return -1
   var processId = parseInt(match[1], 10)
   return isFinite(processId) && processId > 0 ? processId : -1

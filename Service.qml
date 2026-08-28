@@ -4,7 +4,7 @@ import Quickshell.Io
 import "Model.js" as Model
 
 // GalaxyBudsClient owns the Bluetooth protocol connection. This service only
-// watches the hook's status file and invokes the client's documented CLI/D-Bus
+// consumes bounded helper output and invokes the client's documented CLI/D-Bus
 // action surface.
 Item {
   id: root
@@ -18,6 +18,12 @@ Item {
 
   readonly property string statePath: (Quickshell.env("XDG_STATE_HOME")
     || Quickshell.env("HOME") + "/.local/state") + "/omarchy-buds/status.json"
+  readonly property string helperPath: {
+    var url = String(Qt.resolvedUrl("bin/omarchy-buds-helper"))
+    return url.indexOf("file://") === 0
+      ? decodeURIComponent(url.substring(7))
+      : url
+  }
   readonly property bool hookReady: statusFilePresent && status.ok
   readonly property bool snapshotCurrent: hookReady
     && Model.snapshotIsCurrent(status, clientProcessId)
@@ -46,16 +52,11 @@ Item {
   readonly property bool supportsConversationDetection: connected && status.actions.conversationToggle !== ""
   readonly property bool supportsOneEarbudNoiseControl: connected && status.actions.oneEarbudToggle !== ""
 
-  function applyText(raw) {
-    statusFilePresent = true
-    var parsed = Model.parseStatus(raw)
-    status = parsed
-    if (Model.snapshotNeedsProbe(parsed, clientProcessId)) probeClient()
-  }
-
-  function stateGone() {
-    statusFilePresent = false
-    status = Model.defaultStatus()
+  function applyBridgeText(raw) {
+    var result = Model.parseBridgeResult(raw)
+    statusFilePresent = result.present
+    status = result.status
+    if (Model.snapshotNeedsProbe(status, clientProcessId)) probeClient()
   }
 
   function probeClient() {
@@ -67,8 +68,13 @@ Item {
   }
 
   function refresh() {
-    stateFile.reload()
+    restartStatusWatch()
     probeClient()
+  }
+
+  function restartStatusWatch() {
+    if (statusWatch.running) statusWatch.running = false
+    statusWatchRestart.restart()
   }
 
   function actionAllowed(action) {
@@ -83,7 +89,7 @@ Item {
   function executeAction(action) {
     if (!connected || busy || !actionAllowed(action)) return
     actionStatus = ""
-    actionProcess.command = ["galaxybudsclient", "action", "-e", action]
+    actionProcess.command = [helperPath, "action", action]
     actionProcess.running = true
   }
 
@@ -114,19 +120,27 @@ Item {
   function openClient() {
     if (!clientRunning || busy) return
     actionStatus = ""
-    actionProcess.command = ["galaxybudsclient", "app", "--activate-window"]
+    actionProcess.command = [helperPath, "action", "open-client"]
     actionProcess.running = true
   }
 
-  FileView {
-    id: stateFile
-    path: root.statePath
-    watchChanges: true
-    printErrors: false
-    // Atomic replacement can emit before FileView's text cache changes.
-    onFileChanged: reload()
-    onLoaded: root.applyText(text())
-    onLoadFailed: root.stateGone()
+  // The helper opens the status path O_NOFOLLOW | O_NONBLOCK, verifies the
+  // descriptor is a regular file, and emits only bounded canonical JSON.
+  Process {
+    id: statusWatch
+    running: true
+    command: [root.helperPath, "watch-status", root.statePath]
+    stdout: SplitParser {
+      onRead: function(line) { root.applyBridgeText(line) }
+    }
+    onExited: statusWatchRestart.restart()
+  }
+
+  Timer {
+    id: statusWatchRestart
+    interval: 1000
+    repeat: false
+    onTriggered: if (!statusWatch.running) statusWatch.running = true
   }
 
   // A crashed process cannot remove its hook output. Treat the status file as
@@ -135,11 +149,12 @@ Item {
   Process {
     id: clientProbe
     running: false
-    command: ["busctl", "--user", "status", "me.timschneeberger.GalaxyBudsClient"]
+    command: [root.helperPath, "owner-pid"]
     stdout: StdioCollector { id: clientProbeOut; waitForEnd: true }
-    stderr: StdioCollector { waitForEnd: true }
     onExited: function(exitCode) {
-      root.clientProcessId = exitCode === 0 ? Model.busctlProcessId(clientProbeOut.text) : -1
+      root.clientProcessId = exitCode === 0
+        ? Model.helperProcessId(clientProbeOut.text)
+        : -1
       root.clientRunning = exitCode === 0 && root.clientProcessId > 0
     }
   }
@@ -147,17 +162,12 @@ Item {
   Process {
     id: clientOwnerMonitor
     running: true
-    command: [
-      "busctl", "--user",
-      "--match=type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='me.timschneeberger.GalaxyBudsClient'",
-      "monitor"
-    ]
+    command: [root.helperPath, "monitor-owner"]
     stdout: SplitParser {
       onRead: function(line) {
-        if (String(line).indexOf("Member=NameOwnerChanged") >= 0) root.probeClient()
+        if (String(line).trim() === "changed") root.probeClient()
       }
     }
-    stderr: StdioCollector { waitForEnd: false }
     onExited: {
       root.probeClient()
       clientOwnerMonitorRestart.restart()
@@ -168,7 +178,10 @@ Item {
     id: clientOwnerMonitorRestart
     interval: 5000
     repeat: false
-    onTriggered: if (!clientOwnerMonitor.running) clientOwnerMonitor.running = true
+    onTriggered: {
+      if (!clientOwnerMonitor.running) clientOwnerMonitor.running = true
+      root.probeClient()
+    }
   }
 
   Timer {
@@ -191,13 +204,12 @@ Item {
     running: false
     command: []
     stdout: StdioCollector { id: actionOut; waitForEnd: true }
-    stderr: StdioCollector { id: actionErr; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode === 0) {
         root.actionStatus = "Action sent to GalaxyBudsClient"
         postActionRefresh.restart()
       } else {
-        root.actionStatus = Model.elideError(actionErr.text || actionOut.text
+        root.actionStatus = Model.elideError(actionOut.text
           || "GalaxyBudsClient rejected the action")
       }
       actionStatusTimer.restart()
@@ -209,7 +221,7 @@ Item {
     id: postActionRefresh
     interval: 300
     repeat: false
-    onTriggered: stateFile.reload()
+    onTriggered: root.restartStatusWatch()
   }
 
   Timer {

@@ -126,10 +126,12 @@ $XDG_STATE_HOME/omarchy-buds/status.json
 # fallback: ~/.local/state/omarchy-buds/status.json
 ```
 
-The Quickshell side can use `FileView { watchChanges: true }`, matching the
-successful event-driven pattern in omarchy-pods. It should also make stale
-state impossible to mistake for a running client by handling disconnect and
-process exit, with a lightweight D-Bus liveness fallback if needed.
+The Quickshell side must not open the GalaxyBudsClient-controlled snapshot
+directly. A small replaceable helper should perform a bounded regular-file,
+no-follow read, validate the document outside QML, and emit only canonical
+bounded data. It should also make stale state impossible to mistake for a
+running client by handling disconnect and process exit, with a lightweight
+D-Bus liveness fallback if needed.
 
 ## Why not connect to the Buds directly
 
@@ -170,6 +172,7 @@ Panel.qml
 Service.qml
 Model.js
 GalaxyBudsIcon.qml
+bin/omarchy-buds-helper
 setup
 galaxy-client/OmarchyBudsStatus.cs
 tests/model.test.js
